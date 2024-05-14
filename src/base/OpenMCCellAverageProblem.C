@@ -52,13 +52,6 @@ InputParameters
 OpenMCCellAverageProblem::validParams()
 {
   InputParameters params = OpenMCProblemBase::validParams();
-  params.addParam<std::vector<SubdomainName>>("fluid_blocks", "DEPRECATED");
-  params.addParam<std::vector<SubdomainName>>("solid_blocks", "DEPRECATED");
-  params.addParam<unsigned int>("solid_cell_level", "DEPRECATED");
-  params.addParam<unsigned int>("lowest_solid_cell_level", "DEPRECATED");
-  params.addParam<unsigned int>("fluid_cell_level", "DEPRECATED");
-  params.addParam<unsigned int>("lowest_fluid_cell_level", "DEPRECATED");
-
   params.addParam<bool>("output_cell_mapping",
                         true,
                         "Whether to automatically output the mapping from OpenMC cells to the "
@@ -74,11 +67,10 @@ OpenMCCellAverageProblem::validParams()
       getInitialPropertiesEnum(),
       "Where to read the temperature and density initial conditions for OpenMC");
 
-  params.addParam<bool>(
-      "export_properties",
-      false,
-      "Whether to export OpenMC's temperature and density properties after updating "
-      "them from MOOSE.");
+  params.addParam<bool>("export_properties",
+                        false,
+                        "Whether to export OpenMC's temperature and density properties to an HDF5 "
+                        "file after updating them from MOOSE.");
   params.addParam<bool>(
       "normalize_by_global_tally",
       true,
@@ -111,12 +103,13 @@ OpenMCCellAverageProblem::validParams()
 
   MooseEnum scores_heat(
     "heating heating_local kappa_fission fission_q_prompt fission_q_recoverable");
-  params.addParam<MooseEnum>("source_rate_normalization",
-                             scores_heat,
-                             "Score to use for computing the "
-                             "particle source rate (source/sec) for a certain tallies in "
-                             "eigenvalue mode. In other words, the "
-                             "source/sec is computed as power /<the global value of this tally>");
+  params.addParam<MooseEnum>(
+      "source_rate_normalization",
+      scores_heat,
+      "Score to use for computing the "
+      "particle source rate (source/sec) for a certain tallies in "
+      "eigenvalue mode. In other words, the "
+      "source/sec is computed as (power divided by the global value of this tally)");
 
   params.addParam<std::vector<std::string>>(
       "tally_name", "Auxiliary variable name(s) to use for OpenMC tallies. "
@@ -193,7 +186,6 @@ OpenMCCellAverageProblem::validParams()
       "will use the value set with this parameter unless the geometry does not have that many "
       "layers of geometry nesting, in which case the locally lowest depth is used");
 
-  params.addParam<bool>("identical_tally_cell_fills", false, "deprecated");
   params.addParam<std::vector<SubdomainName>>(
       "identical_cell_fills",
       "Blocks on which the OpenMC cells have identical fill universes; this is an optimization to "
@@ -202,7 +194,6 @@ OpenMCCellAverageProblem::validParams()
       "it as all other cells which map to these subdomains. We HIGHLY recommend that the first "
       "time you try using this, that you also set 'check_identical_cell_fills = true' to catch "
       "any possible user errors which would exclude you from using this option safely.");
-  params.addParam<bool>("check_identical_tally_cell_fills", false, "deprecated");
   params.addParam<bool>(
       "check_identical_cell_fills",
       false,
@@ -272,10 +263,10 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
     _check_identical_cell_fills(getParam<bool>("check_identical_cell_fills")),
     _assume_separate_tallies(getParam<bool>("assume_separate_tallies")),
     _map_density_by_cell(getParam<bool>("map_density_by_cell")),
-    _has_fluid_blocks(params.isParamSetByUser("density_blocks")),
-    _has_solid_blocks(params.isParamSetByUser("temperature_blocks")),
-    _has_tally_blocks(params.isParamSetByUser("tally_blocks")),
-    _needs_to_map_cells(_has_fluid_blocks || _has_solid_blocks || _has_tally_blocks),
+    _specified_density_feedback(params.isParamSetByUser("density_blocks")),
+    _specified_temperature_feedback(params.isParamSetByUser("temperature_blocks")),
+    _needs_to_map_cells(_specified_density_feedback || _specified_temperature_feedback ||
+                        params.isParamSetByUser("tally_blocks")),
     _needs_global_tally(_check_tally_sum || _normalize_by_global),
     _volume_calc(nullptr),
     _symmetry(nullptr)
@@ -285,21 +276,7 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
                      "output_cell_mapping",
                      "'temperature_blocks', 'density_blocks', and 'tally_blocks' are empty");
 
-  if (isParamValid("solid_blocks"))
-    mooseError("'solid_blocks' is deprecated! Please use 'temperature_blocks' instead");
-
-  if (isParamValid("fluid_blocks"))
-    mooseError("'fluid_blocks' is deprecated! Please use 'density_blocks' instead");
-
-  if (isParamValid("solid_cell_level") || isParamValid("lowest_solid_cell_level") ||
-      isParamValid("fluid_cell_level") || isParamValid("lowest_fluid_cell_level"))
-    mooseError("The cell level is now represented using 'cell_level' or 'lowest_cell_level.'\nIn "
-               "addition, we no longer distinguish this setting based on the fluid/solid phase "
-               "(i.e. if you had DIFFERENT values for solid and fluid settings) because we do not "
-               "think anyone was using this feature and it added code complexity. If this is "
-               "affecting your workflow, please contact the Cardinal development team.");
-
-  if (!_has_solid_blocks && !_has_fluid_blocks)
+  if (!_specified_temperature_feedback && !_specified_density_feedback)
     checkUnusedParam(
         params, "initial_properties", "'temperature_blocks' and 'density_blocks' are unused");
 
@@ -374,7 +351,7 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
   {
     const auto & scores = getParam<MultiMooseEnum>("tally_score");
     for (const auto & score : scores)
-      _tally_score.push_back(tallyScore(score));
+      _tally_score.push_back(enumToTallyScore(score));
   }
   else
     _tally_score = {"kappa-fission"};
@@ -417,19 +394,21 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
 
     // If the score is already in tally_score, no need to do anything special.
     // Otherwise, we need to add that score.
-    std::string n = norm;
-    std::replace(n.begin(), n.end(), '_', '-');
+    std::string n = enumToTallyScore(norm);
     auto it = std::find(_tally_score.begin(), _tally_score.end(), n);
     if (it != _tally_score.end())
       _source_rate_index = it - _tally_score.begin();
     else
     {
-      _tally_score.push_back(tallyScore(n));
+      _tally_score.push_back(n);
       _source_rate_index = _tally_score.size() - 1;
 
       if (isParamValid("tally_name"))
-        mooseError("When specifying 'tally_name', the score indicated in 'source_rate_normalization' must be\n"
-          "listed in 'tally_score' so that we know what you want to name that score (", tallyScore(n), ")");
+        mooseError("When specifying 'tally_name', the score indicated in "
+                   "'source_rate_normalization' must be\n"
+                   "listed in 'tally_score' so that we know what you want to name that score (",
+                   norm,
+                   ")");
     }
   }
   else
@@ -481,14 +460,14 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
   else
     checkUnusedParam(params, "first_iteration_particles", "not using Dufek-Gudowski relaxation");
 
-   if (!_has_fluid_blocks || isParamValid("skinner"))
-     checkUnusedParam(params,
-                      "map_density_by_cell",
-                      "either (i) applying geometry skinning or (ii) 'density_blocks' is empty");
+  if (!_specified_density_feedback || isParamValid("skinner"))
+    checkUnusedParam(params,
+                     "map_density_by_cell",
+                     "either (i) applying geometry skinning or (ii) 'density_blocks' is empty");
 
-     // OpenMC will throw an error if the geometry contains DAG universes but OpenMC wasn't compiled
-     // with DAGMC. So we can assume that if we have a DAGMC geometry, that we will also by this
-     // point have DAGMC enabled.
+    // OpenMC will throw an error if the geometry contains DAG universes but OpenMC wasn't compiled
+    // with DAGMC. So we can assume that if we have a DAGMC geometry, that we will also by this
+    // point have DAGMC enabled.
 #ifdef ENABLE_DAGMC
   bool has_csg;
   bool has_dag;
@@ -537,129 +516,20 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
   if (_relaxation != relaxation::constant)
     checkUnusedParam(params, "relaxation_factor", "not using constant relaxation");
 
-  if (isParamSetByUser("check_identical_tally_cell_fills"))
-    mooseError(
-        "'check_identical_tally_cell_fills' has been renamed to 'check_identical_cell_fills'");
-
-  if (isParamSetByUser("identical_tally_cell_fills"))
-    mooseError(
-        "'identical_tally_cell_fills' has been replaced by 'identical_cell_fills', "
-        "where you now specify the block names for which cell fills are identical universes");
-
-  std::vector<SubdomainName> dummy;
-  readBlockParameters("identical_cell_fills", _identical_cell_fill_blocks, dummy /* not needed */);
+  readBlockParameters("identical_cell_fills", _identical_cell_fill_blocks);
 
   if (!_has_identical_cell_fills)
     checkUnusedParam(
         params, "check_identical_cell_fills", "'identical_cell_fills' is not specified");
 
-  if (!isParamValid("temperature_blocks"))
-    checkUnusedParam(params, "temperature_variables", "not setting 'temperature_blocks'");
-
-  std::vector<std::vector<SubdomainName>> temperature_blocks;
-  if (isParamValid("temperature_blocks"))
-  {
-    read2DBlockParameters("temperature_blocks", temperature_blocks, _temp_blocks);
-
-    // now, get the names of those temperature variables
-    std::vector<std::vector<std::string>> temperature_vars;
-    if (isParamValid("temperature_variables"))
-    {
-      temperature_vars = getParam<std::vector<std::vector<std::string>>>("temperature_variables");
-
-      checkEmptyVector(temperature_vars, "'temperature_variables'");
-      for (const auto & t : temperature_vars)
-        checkEmptyVector(t, "Entries in 'temperature_variables'");
-
-      if (temperature_vars.size() != temperature_blocks.size())
-        mooseError("'temperature_variables' and 'temperature_blocks' must be the same length!\n"
-                   "'temperature_variables' is of length " +
-                   std::to_string(temperature_vars.size()) +
-                   " and 'temperature_blocks' is of length " +
-                   std::to_string(temperature_blocks.size()));
-
-      // TODO: for now, we restrict each set of blocks to map to a single temperature variable
-      for (std::size_t i = 0; i < temperature_vars.size(); ++i)
-        if (temperature_vars[i].size() > 1)
-          mooseError("Each entry in 'temperature_variables' must be of length 1. "
-            "Entry " + std::to_string(i) + " is of length ", temperature_vars[i].size(), ".");
-    }
-    else
-    {
-      // set a reasonable default, if not specified
-      temperature_vars.resize(temperature_blocks.size(), std::vector<std::string>(1));
-      for (std::size_t i = 0; i < temperature_blocks.size(); ++i)
-        temperature_vars[i][0] = "temp";
-    }
-
-    for (std::size_t i = 0; i < temperature_vars.size(); ++i)
-      for (std::size_t j = 0; j < temperature_blocks[i].size(); ++j)
-        _temp_vars_to_blocks[temperature_vars[i][0]].push_back(temperature_blocks[i][j]);
-  }
-
-  if (!isParamValid("density_blocks"))
-    checkUnusedParam(params, "density_variables", "not setting 'density_blocks'");
-
-  std::vector<std::vector<SubdomainName>> density_blocks;
-  if (isParamValid("density_blocks"))
-  {
-    read2DBlockParameters("density_blocks", density_blocks, _density_blocks);
-
-    // For now, we do not have any tests covering applying density feedback without the presence
-    // of temperature feedback. So each entry in density_blocks should also be in
-    // temp_vars_to_blocks (same variable, same block)
-    bool found = false;
-    for (const auto & d : _density_blocks)
-    {
-      if (std::find(_temp_blocks.begin(), _temp_blocks.end(), d) == _temp_blocks.end())
-        mooseError("Each entry in 'density_blocks' should also be in 'temperature_blocks'. Block " +
-                   std::to_string(d) + " was not found in 'temperature_blocks'");
-    }
-
-    // now, get the names of those density variables
-    std::vector<std::vector<std::string>> density_vars;
-    if (isParamValid("density_variables"))
-    {
-      density_vars = getParam<std::vector<std::vector<std::string>>>("density_variables");
-
-      checkEmptyVector(density_vars, "'density_variables'");
-      for (const auto & t : density_vars)
-        checkEmptyVector(t, "Entries in 'density_variables'");
-
-      if (density_vars.size() != density_blocks.size())
-        mooseError("'density_variables' and 'density_blocks' must be the same length!");
-
-      // TODO: for now, we restrict each set of blocks to map to a single density variable
-      for (std::size_t i = 0; i < density_vars.size(); ++i)
-        if (density_vars[i].size() > 1)
-          mooseError("Each entry in 'density_variables' must be of length 1. Entry " +
-                         std::to_string(i) + " is of length ",
-                     density_vars[i].size());
-    }
-    else
-    {
-      // set a reasonable default, if not specified
-      density_vars.resize(density_blocks.size(), std::vector<std::string>(1));
-      for (std::size_t i = 0; i < density_blocks.size(); ++i)
-        density_vars[i][0] = "density";
-    }
-
-    for (std::size_t i = 0; i < density_vars.size(); ++i)
-      for (std::size_t j = 0; j < density_blocks[i].size(); ++j)
-        _density_vars_to_blocks[density_vars[i][0]].push_back(density_blocks[i][j]);
-  }
+  readBlockVariables("temperature", "temp", _temp_vars_to_blocks, _temp_blocks);
+  readBlockVariables("density", "density", _density_vars_to_blocks, _density_blocks);
 
   for (const auto & i : _identical_cell_fill_blocks)
     if (std::find(_density_blocks.begin(), _density_blocks.end(), i) != _density_blocks.end())
       mooseError(
           "Entries in 'identical_cell_fills' cannot be contained in 'density_blocks'; the\n"
           "identical fill universe optimization is not yet implemented for density feedback.");
-
-  std::set_difference(_temp_blocks.begin(),
-                      _temp_blocks.end(),
-                      _density_blocks.begin(),
-                      _density_blocks.end(),
-                      std::inserter(_exclusive_temp_blocks, _exclusive_temp_blocks.end()));
 
   switch (_tally_type)
   {
@@ -672,8 +542,7 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
       checkUnusedParam(params, {"mesh_template", "mesh_translations", "mesh_translations_file"},
                                "using cell tallies");
 
-      std::vector<SubdomainName> dummy;
-      readBlockParameters("tally_blocks", _tally_blocks, dummy /* not needed */);
+      readBlockParameters("tally_blocks", _tally_blocks);
 
       // If not specified, add tallies to all MOOSE blocks
       if (!isParamValid("tally_blocks"))
@@ -696,8 +565,11 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
       else
       {
          if (std::abs(_scaling - 1.0) > 1e-6)
-           mooseError("Directly tallying on the [Mesh] is only supported for 'scaling' of unity,\n"
-             "because we multiply the [Mesh] by 'scaling' when tallying on it in OpenMC.");
+           mooseError("Directly tallying on the [Mesh] is only supported for 'scaling' of unity. "
+                      "Instead, please make a file containing your tally mesh and set it with "
+                      "'mesh_template'. You can generate a mesh file corresponding to the [Mesh] "
+                      "by running:\n\ncardinal-opt -i " +
+                      _app.getFileName() + " --mesh-only");
 
          // for distributed meshes, each rank only owns a portion of the mesh information, but
          // OpenMC wants the entire mesh to be available on every rank. We might be able to add
@@ -783,6 +655,59 @@ OpenMCCellAverageProblem::OpenMCCellAverageProblem(const InputParameters & param
 }
 
 void
+OpenMCCellAverageProblem::readBlockVariables(
+    const std::string & param,
+    const std::string & default_name,
+    std::map<std::string, std::vector<SubdomainName>> & vars_to_specified_blocks,
+    std::vector<SubdomainID> & specified_blocks)
+{
+  std::string b = param + "_blocks";
+  std::string v = param + "_variables";
+
+  if (!isParamValid(b))
+  {
+    checkUnusedParam(parameters(), v, "not setting '" + b + "'");
+    return;
+  }
+
+  std::vector<std::vector<SubdomainName>> blocks;
+  read2DBlockParameters(b, blocks, specified_blocks);
+
+  // now, get the names of those temperature variables
+  std::vector<std::vector<std::string>> vars;
+  if (isParamValid(v))
+  {
+    vars = getParam<std::vector<std::vector<std::string>>>(v);
+
+    checkEmptyVector(vars, "'" + v + "");
+    for (const auto & t : vars)
+      checkEmptyVector(t, "Entries in '" + v + "'");
+
+    if (vars.size() != blocks.size())
+      mooseError("'" + v + "' and '" + b + "' must be the same length!\n'" + v + "' is of length " +
+                 std::to_string(vars.size()) + " and '" + b + "' is of length " +
+                 std::to_string(blocks.size()));
+
+    // TODO: for now, we restrict each set of blocks to map to a single temperature variable
+    for (std::size_t i = 0; i < vars.size(); ++i)
+      if (vars[i].size() > 1)
+        mooseError("Each entry in '" + v + "' must be of length 1. Entry " + std::to_string(i) +
+                   " is of length " + std::to_string(vars[i].size()));
+  }
+  else
+  {
+    // set a reasonable default, if not specified
+    vars.resize(blocks.size(), std::vector<std::string>(1));
+    for (std::size_t i = 0; i < blocks.size(); ++i)
+      vars[i][0] = default_name;
+  }
+
+  for (std::size_t i = 0; i < vars.size(); ++i)
+    for (std::size_t j = 0; j < blocks[i].size(); ++j)
+      vars_to_specified_blocks[vars[i][0]].push_back(blocks[i][j]);
+}
+
+void
 OpenMCCellAverageProblem::initialSetup()
 {
   OpenMCProblemBase::initialSetup();
@@ -824,11 +749,13 @@ OpenMCCellAverageProblem::initialSetup()
 #ifdef ENABLE_DAGMC
   if (isParamValid("skinner"))
   {
-    if (_exclusive_temp_blocks.size() && _has_fluid_blocks)
-      mooseError("The 'skinner' will apply density skinning over the entire domain, and requires "
-                 "that the entire problem uses identical settings for feedback. "
-                 "Please update 'density_blocks' to include all blocks, and set density values "
-                 "accordingly.");
+    std::set<SubdomainID> t(_temp_blocks.begin(), _temp_blocks.end());
+    std::set<SubdomainID> d(_density_blocks.begin(), _density_blocks.end());
+
+    if (t != d && _specified_density_feedback)
+      mooseError("The 'skinner' will apply skinning over the entire domain, and requires that the "
+                 "entire problem uses identical settings for feedback. Please update "
+                 "'temperature_blocks' and 'density_blocks' to include all blocks.");
 
     if (_symmetry)
       mooseError("Cannot combine the 'skinner' with 'symmetry_mapper'!\n\nWhen using a skinner, "
@@ -843,7 +770,7 @@ OpenMCCellAverageProblem::initialSetup()
     if (!_skinner)
       paramError("skinner", "The 'skinner' user object must be of type MoabSkinner!");
 
-    if (_skinner->hasDensitySkinning() != _has_fluid_blocks)
+    if (_skinner->hasDensitySkinning() != _specified_density_feedback)
       mooseError(
           "Detected inconsistent settings for density skinning and 'density_blocks'. If applying "
           "density feedback with 'density_blocks', then you must apply density skinning in the '",
@@ -1128,24 +1055,28 @@ OpenMCCellAverageProblem::readMeshTranslations(const std::vector<std::vector<dou
 
 void
 OpenMCCellAverageProblem::readBlockParameters(const std::string name,
-                                              std::unordered_set<SubdomainID> & blocks,
-                                              std::vector<SubdomainName> & names)
+                                              std::unordered_set<SubdomainID> & blocks)
 {
   if (isParamValid(name))
   {
-    names = getParam<std::vector<SubdomainName>>(name);
+    auto names = getParam<std::vector<SubdomainName>>(name);
     checkEmptyVector(names, "'" + name + "'");
 
     auto b_ids = _mesh.getSubdomainIDs(names);
-
     std::copy(b_ids.begin(), b_ids.end(), std::inserter(blocks, blocks.end()));
-
-    const auto & subdomains = _mesh.meshSubdomains();
-    for (const auto & b : blocks)
-      if (subdomains.find(b) == subdomains.end())
-        mooseError("Block " + Moose::stringify(b) + " specified in '" + name + "' " +
-                   "not found in mesh!");
+    checkBlocksInMesh(name, b_ids, names);
   }
+}
+
+void
+OpenMCCellAverageProblem::checkBlocksInMesh(const std::string name,
+                                            const std::vector<SubdomainID> & ids,
+                                            const std::vector<SubdomainName> & names) const
+{
+  const auto & subdomains = _mesh.meshSubdomains();
+  for (std::size_t b = 0; b < names.size(); ++b)
+    if (subdomains.find(ids[b]) == subdomains.end())
+      mooseError("Block '" + names[b] + "' specified in '" + name + "' " + "not found in mesh!");
 }
 
 void
@@ -1171,11 +1102,7 @@ OpenMCCellAverageProblem::read2DBlockParameters(const std::string name,
         flattened_names.push_back(i);
 
     flattened_ids = _mesh.getSubdomainIDs(flattened_names);
-    const auto & subdomains = _mesh.meshSubdomains();
-    for (const auto & i : flattened_ids)
-      if (subdomains.find(i) == subdomains.end())
-        mooseError("Block " + Moose::stringify(i) + " specified in '" + name + "' " +
-                   "not found in mesh!");
+    checkBlocksInMesh(name, flattened_ids, flattened_names);
 
     // should not be any duplicate blocks
     std::set<SubdomainName> n;
@@ -1202,7 +1129,7 @@ OpenMCCellAverageProblem::elemFeedback(const Elem * elem) const
   else if (!has_density && has_temp)
     return coupling::temperature;
   else if (has_density && !has_temp)
-    mooseError("Cardinal does not yet support blocks with only density feedback");
+    return coupling::density;
   else
     return coupling::none;
 }
@@ -1210,15 +1137,42 @@ OpenMCCellAverageProblem::elemFeedback(const Elem * elem) const
 void
 OpenMCCellAverageProblem::storeElementPhase()
 {
-  _n_moose_fluid_elems = 0;
-  for (const auto & f : _density_blocks)
-    _n_moose_fluid_elems += numElemsInSubdomain(f);
+  std::set<SubdomainID> excl_temp_blocks;
+  std::set<SubdomainID> excl_density_blocks;
+  std::set<SubdomainID> intersect;
 
-  _n_moose_solid_elems = 0;
-  for (const auto & s : _exclusive_temp_blocks)
-    _n_moose_solid_elems += numElemsInSubdomain(s);
+  std::set<SubdomainID> t(_temp_blocks.begin(), _temp_blocks.end());
+  std::set<SubdomainID> d(_density_blocks.begin(), _density_blocks.end());
 
-  _n_moose_none_elems = _mesh.nElem() - _n_moose_fluid_elems - _n_moose_solid_elems;
+  std::set_difference(t.begin(),
+                      t.end(),
+                      d.begin(),
+                      d.end(),
+                      std::inserter(excl_temp_blocks, excl_temp_blocks.end()));
+
+  std::set_difference(d.begin(),
+                      d.end(),
+                      t.begin(),
+                      t.end(),
+                      std::inserter(excl_density_blocks, excl_density_blocks.end()));
+
+  std::set_intersection(
+      t.begin(), t.end(), d.begin(), d.end(), std::inserter(intersect, intersect.begin()));
+
+  _n_moose_temp_density_elems = 0;
+  for (const auto & s : intersect)
+    _n_moose_temp_density_elems += numElemsInSubdomain(s);
+
+  _n_moose_temp_elems = 0;
+  for (const auto & s : excl_temp_blocks)
+    _n_moose_temp_elems += numElemsInSubdomain(s);
+
+  _n_moose_density_elems = 0;
+  for (const auto & s : excl_density_blocks)
+    _n_moose_density_elems += numElemsInSubdomain(s);
+
+  _n_moose_none_elems =
+      _mesh.nElem() - _n_moose_temp_density_elems - _n_moose_temp_elems - _n_moose_density_elems;
 }
 
 void
@@ -1283,7 +1237,7 @@ OpenMCCellAverageProblem::gatherCellVector(std::vector<T> & local, std::vector<u
 }
 
 coupling::CouplingFields
-OpenMCCellAverageProblem::cellCouplingFields(const cellInfo & cell_info) const
+OpenMCCellAverageProblem::cellFeedback(const cellInfo & cell_info) const
 {
   // _cell_to_elem only holds cells that are coupled by feedback to the [Mesh] (for sake of
   // efficiency in cell-based loops for updating temperatures, densities and
@@ -1300,43 +1254,29 @@ OpenMCCellAverageProblem::cellCouplingFields(const cellInfo & cell_info) const
 void
 OpenMCCellAverageProblem::getCellMappedPhase()
 {
-  std::vector<int> cells_n_solid;
-  std::vector<int> cells_n_fluid;
+  std::vector<int> cells_n_temp;
+  std::vector<int> cells_n_temp_rho;
+  std::vector<int> cells_n_rho;
   std::vector<int> cells_n_none;
 
   // whether each cell maps to a single phase
   for (const auto & c : _local_cell_to_elem)
   {
-    int n_solid = 0, n_fluid = 0, n_none = 0;
+    std::vector<int> f(4 /* number of coupling options */, 0);
 
+    // we are looping over local elements, so no need to check for nullptr
     for (const auto & e : c.second)
-    {
-      // we are looping over local elements, so no need to check for nullptr
-      const Elem * elem = _mesh.queryElemPtr(globalElemID(e));
+      f[elemFeedback(_mesh.queryElemPtr(globalElemID(e)))]++;
 
-      switch (elemFeedback(elem))
-      {
-        case coupling::temperature:
-          n_solid++;
-          break;
-        case coupling::density_and_temperature:
-          n_fluid++;
-          break;
-        case coupling::none:
-          n_none++;
-          break;
-        default:
-          mooseError("Unhandled CouplingFieldsEnum in OpenMCCellAverageProblem!");
-      }
-    }
-
-    cells_n_solid.push_back(n_solid);
-    cells_n_fluid.push_back(n_fluid);
-    cells_n_none.push_back(n_none);
+    cells_n_temp.push_back(f[coupling::temperature]);
+    cells_n_temp_rho.push_back(f[coupling::density_and_temperature]);
+    cells_n_rho.push_back(f[coupling::density]);
+    cells_n_none.push_back(f[coupling::none]);
   }
 
-  gatherCellSum(cells_n_solid, _n_solid);
-  gatherCellSum(cells_n_fluid, _n_fluid);
+  gatherCellSum(cells_n_temp, _n_temp);
+  gatherCellSum(cells_n_temp_rho, _n_temp_rho);
+  gatherCellSum(cells_n_rho, _n_rho);
   gatherCellSum(cells_n_none, _n_none);
 }
 
@@ -1358,18 +1298,18 @@ OpenMCCellAverageProblem::checkCellMappedPhase()
     _volume_calc->computeVolumes();
   }
 
-  VariadicTable<std::string, int, int, int, std::string, std::string> vt(
-      {"Cell", "  T  ", "T+rho", "Other", "Mapped Vol", "Actual Vol"});
+  VariadicTable<std::string, int, int, int, int, std::string, std::string> vt(
+      {"Cell", "  T  ", " rho ", "T+rho", "Other", "Mapped Vol", "Actual Vol"});
 
-  bool has_density_cells = false;
-  bool has_exclusive_temp_cells = false;
+  bool has_mapping = false;
 
   std::vector<Real> cv;
   for (const auto & c : _cell_to_elem)
   {
     auto cell_info = c.first;
-    int n_solid = _n_solid[cell_info];
-    int n_fluid = _n_fluid[cell_info];
+    int n_temp = _n_temp[cell_info];
+    int n_rho = _n_rho[cell_info];
+    int n_temp_rho = _n_temp_rho[cell_info];
     int n_none = _n_none[cell_info];
 
     std::ostringstream vol;
@@ -1387,28 +1327,39 @@ OpenMCCellAverageProblem::checkCellMappedPhase()
 
     // okay to print vol.str() here because only rank 0 is printing (which is the only one
     // with meaningful volume data from OpenMC)
-    vt.addRow(printCell(cell_info, true), n_solid, n_fluid, n_none, map.str(), vol.str());
+    vt.addRow(printCell(cell_info, true), n_temp, n_rho, n_temp_rho, n_none, map.str(), vol.str());
 
-    // cells can only map to a single type of MOOSE feedback
-    std::vector<bool> conditions = {n_fluid > 0, n_solid > 0, n_none > 0};
+    // cells can only map to a single type of feedback
+    std::vector<bool> conditions = {n_temp_rho > 0, n_temp > 0, n_rho > 0, n_none > 0};
     if (std::count(conditions.begin(), conditions.end(), true) > 1)
     {
       std::stringstream msg;
-      msg << "Cell " << printCell(cell_info) << " mapped to " << n_solid << " T elements, "
-          << n_fluid << " T+rho elements, and " << n_none
-          << " uncoupled elements.\n"
-             "Each OpenMC cell, instance pair must map to elements of the same coupling settings.";
+      std::vector<int> conds = {n_temp, n_rho, n_temp_rho, n_none};
+      int size = std::to_string(*std::max_element(conds.begin(), conds.end())).length();
+      msg << "Cell " << printCell(cell_info) << " mapped to:\n\n  " << std::setw(size) << n_temp
+          << "  elements with temperature feedback\n  " << std::setw(size) << n_rho
+          << "  elements with density feedback\n  " << std::setw(size) << n_temp_rho
+          << "  elements with both temperature and density feedback\n  " << std::setw(size)
+          << n_none
+          << "  uncoupled elements\n\n"
+             "Each OpenMC cell (ID, instance) pair must map to elements of the same coupling "
+             "settings.";
       mooseError(msg.str());
     }
 
-    if (n_solid)
+    if (n_temp)
     {
-      has_exclusive_temp_cells = true;
+      has_mapping = true;
       _cell_phase[cell_info] = coupling::temperature;
     }
-    else if (n_fluid)
+    else if (n_rho)
     {
-      has_density_cells = true;
+      has_mapping = true;
+      _cell_phase[cell_info] = coupling::density;
+    }
+    else if (n_temp_rho)
+    {
+      has_mapping = true;
       _cell_phase[cell_info] = coupling::density_and_temperature;
     }
     else
@@ -1427,8 +1378,8 @@ OpenMCCellAverageProblem::checkCellMappedPhase()
       _cell_volume[c.first] = cv[i++];
   }
 
-  if (_has_fluid_blocks || _has_solid_blocks)
-    if (!has_density_cells && !has_exclusive_temp_cells)
+  if (_specified_density_feedback || _specified_temperature_feedback)
+    if (!has_mapping)
       mooseError("Feedback was specified using 'temperature_blocks' and/or 'density_blocks', but "
                  "no MOOSE elements mapped to OpenMC cells!");
 
@@ -1437,7 +1388,8 @@ OpenMCCellAverageProblem::checkCellMappedPhase()
     _console
         << "\n ===================>     MAPPING FROM OPENMC TO MOOSE     <===================\n"
         << std::endl;
-    _console << "          T:      # elems providing temperature feedback" << std::endl;
+    _console << "          T:      # elems providing temperature-only feedback" << std::endl;
+    _console << "          rho:    # elems providing density-only feedback" << std::endl;
     _console << "          T+rho:  # elems providing temperature and density feedback" << std::endl;
     _console << "          Other:  # elems which do not provide feedback to OpenMC" << std::endl;
     _console << "                    (but receives a cell tally from OpenMC)" << std::endl;
@@ -1447,13 +1399,14 @@ OpenMCCellAverageProblem::checkCellMappedPhase()
     vt.print(_console);
   }
 
-  bool has_io = _has_fluid_blocks || _has_solid_blocks || _tally_type != tally::none;
+  bool has_io =
+      _specified_density_feedback || _specified_temperature_feedback || _tally_type != tally::none;
 
   if (has_io)
     _console << "\n ===================>     AUXVARIABLES FOR OPENMC I/O     <===================\n"
              << std::endl;
 
-  if (_has_fluid_blocks || _has_solid_blocks)
+  if (_specified_density_feedback || _specified_temperature_feedback)
   {
     _console << "      Subdomain:  subdomain name/ID" << std::endl;
     _console << "    Temperature:  variable OpenMC reads temperature from (empty if no feedback)"
@@ -1464,12 +1417,16 @@ OpenMCCellAverageProblem::checkCellMappedPhase()
     VariadicTable<std::string, std::string, std::string> aux(
         {"Subdomain", "Temperature", "Density"});
 
-    // NOTE: this will need to be adjusted if we support blocks with only density feedback
-    for (const auto & s : _temp_blocks)
+    for (const auto & s : _mesh.meshSubdomains())
     {
+      std::string temp = _subdomain_to_temp_vars.count(s) ? _subdomain_to_temp_vars[s].second : "";
       std::string rho =
           _subdomain_to_density_vars.count(s) ? _subdomain_to_density_vars[s].second : "";
-      aux.addRow(subdomainName(s), _subdomain_to_temp_vars[s].second, rho);
+
+      if (temp == "" && rho == "")
+        continue;
+
+      aux.addRow(subdomainName(s), temp, rho);
     }
 
     aux.print(_console);
@@ -1692,7 +1649,7 @@ OpenMCCellAverageProblem::getMaterialFills()
     int32_t material_index;
     auto is_material_cell = materialFill(cell_info, material_index);
 
-    if (cellCouplingFields(cell_info) != coupling::density_and_temperature)
+    if (!hasDensityFeedback(cell_info))
     {
       // TODO: this check should be extended for non-fluid cells which may contain
       // lattices or  universes
@@ -1707,11 +1664,10 @@ OpenMCCellAverageProblem::getMaterialFills()
       materials_in_fluid.insert(material_index);
     else if (_map_density_by_cell)
       mooseError(printMaterial(material_index) +
-                 " is present in more than one "
-                 "density feedback cell.\nThis means that your model cannot "
-                 "independently change the density in cells filled "
-                 "with this material.\nYou need to edit your OpenMC "
-                 "model to create additional materials unique to each density feedback cell.\n\n"
+                 " is present in more than one density feedback cell.\n\nThis means that your "
+                 "model cannot independently change the density in cells filled with this "
+                 "material. You need to edit your OpenMC model to create additional materials "
+                 "unique to each density feedback cell.\n\n"
                  "Or, if you want to apply feedback to a material spanning multiple "
                  "cells, set 'map_density_by_cell' to false.");
 
@@ -1722,7 +1678,7 @@ OpenMCCellAverageProblem::getMaterialFills()
     vt.addRow(printCell(cell_info), materialID(material_index));
   }
 
-  if (_verbose && _has_fluid_blocks)
+  if (_verbose && _specified_density_feedback)
   {
     _console << "\n ===================>       OPENMC MATERIAL MAPPING       <====================\n" << std::endl;
     _console <<   "           Cell:  OpenMC cell receiving density feedback" << std::endl;
@@ -1822,26 +1778,41 @@ OpenMCCellAverageProblem::initializeElementToCellMapping()
 
   VariadicTable<std::string, int, int, int, int> vt(
       {"", "# T Elems", "# rho Elems", "# T+rho Elems", "# Uncoupled Elems"});
-  vt.addRow("MOOSE mesh", _n_moose_solid_elems, 0, _n_moose_fluid_elems, _n_moose_none_elems);
-  vt.addRow("OpenMC cells", _n_mapped_solid_elems, 0, _n_mapped_fluid_elems, _n_mapped_none_elems);
+  vt.addRow("MOOSE mesh",
+            _n_moose_temp_elems,
+            _n_moose_density_elems,
+            _n_moose_temp_density_elems,
+            _n_moose_none_elems);
+  vt.addRow("OpenMC cells",
+            _n_mapped_temp_elems,
+            _n_mapped_density_elems,
+            _n_mapped_temp_density_elems,
+            _n_mapped_none_elems);
   vt.print(_console);
   _console << std::endl;
 
   if (_needs_to_map_cells)
   {
-    if (_n_moose_solid_elems && (_n_mapped_solid_elems != _n_moose_solid_elems))
-      mooseWarning("The [Mesh] has " + Moose::stringify(_n_moose_solid_elems) +
+    if (_n_moose_temp_elems && (_n_mapped_temp_elems != _n_moose_temp_elems))
+      mooseWarning("The [Mesh] has " + Moose::stringify(_n_moose_temp_elems) +
                    " elements providing temperature feedback (the elements in "
                    "'temperature_blocks'), but only " +
-                   Moose::stringify(_n_mapped_solid_elems) + " got mapped to OpenMC cells.");
+                   Moose::stringify(_n_mapped_temp_elems) + " got mapped to OpenMC cells.");
 
-    if (_n_moose_fluid_elems && (_n_mapped_fluid_elems != _n_moose_fluid_elems))
-      mooseWarning("The [Mesh] has " + Moose::stringify(_n_moose_fluid_elems) +
+    if (_n_moose_temp_elems && (_n_mapped_density_elems != _n_moose_density_elems))
+      mooseWarning("The [Mesh] has " + Moose::stringify(_n_moose_density_elems) +
+                   " elements providing density feedback (the elements in "
+                   "'density_blocks'), but only " +
+                   Moose::stringify(_n_mapped_density_elems) + " got mapped to OpenMC cells.");
+
+    if (_n_moose_temp_density_elems &&
+        (_n_mapped_temp_density_elems != _n_moose_temp_density_elems))
+      mooseWarning("The [Mesh] has " + Moose::stringify(_n_moose_temp_density_elems) +
                    " elements providing temperature and density feedback (the elements in the "
                    "intersection of 'temperature_blocks' and 'density_blocks'), but only " +
-                   Moose::stringify(_n_mapped_fluid_elems) + " got mapped to OpenMC cells.");
+                   Moose::stringify(_n_mapped_temp_density_elems) + " got mapped to OpenMC cells.");
 
-    if (_n_mapped_none_elems)
+    if (_n_mapped_none_elems && (_specified_temperature_feedback || _specified_density_feedback))
       mooseWarning("Skipping OpenMC multiphysics feedback from " +
                    Moose::stringify(_n_mapped_none_elems) +
                    " [Mesh] elements, which occupy a volume of: " +
@@ -2111,23 +2082,41 @@ OpenMCCellAverageProblem::compareContainedCells(std::map<cellInfo, containedCell
 
       // and the instances should exactly match
       if (reference_instances != compare_instances)
-        mooseError("The cell caching failed to get correct instances for material cell ID " +
-                   Moose::stringify(cellID(nested_entry.first)) + " within cell " +
-                   printCell(cell_info) + ".\nYou must unset 'identical_cell_fills'!" +
-                   "\n\nThis error might appear if there are OpenMC cells filled with the same "
-                   "universe/lattice "
-                   "\nfilling the identical-fill cells, but that weren't specified in "
-                   "'identical_cell_fills'.");
+        mooseError(
+            "The cell caching failed to get correct instances for material cell ID " +
+            Moose::stringify(cellID(nested_entry.first)) + " within cell " + printCell(cell_info) +
+            ". You must unset 'identical_cell_fills'!" + "\n\nThis error might appear if:\n" +
+            " - There is a mismatch between your OpenMC model and the [Mesh]\n"
+            " - There are additional OpenMC cells filled with this repeatable universe/lattice, "
+            "but which are not mapping to the blocks in 'identical_cell_fills'");
     }
   }
+}
+
+unsigned int
+OpenMCCellAverageProblem::getCellLevel(const Point & c) const
+{
+  unsigned int level = _cell_level;
+  if (_cell_level > _particle.n_coord() - 1)
+  {
+    if (isParamValid("lowest_cell_level"))
+      level = _particle.n_coord() - 1;
+    else
+      mooseError("Requested coordinate level of " + Moose::stringify(_cell_level) +
+                 " exceeds number of nested coordinate levels at " + printPoint(c) + ": " +
+                 Moose::stringify(_particle.n_coord()));
+  }
+
+  return level;
 }
 
 void
 OpenMCCellAverageProblem::mapElemsToCells()
 {
   // reset counters, flags
-  _n_mapped_solid_elems = 0;
-  _n_mapped_fluid_elems = 0;
+  _n_mapped_temp_elems = 0;
+  _n_mapped_density_elems = 0;
+  _n_mapped_temp_density_elems = 0;
   _n_mapped_none_elems = 0;
   _uncoupled_volume = 0.0;
   _material_cells_only = true;
@@ -2148,9 +2137,11 @@ OpenMCCellAverageProblem::mapElemsToCells()
 
     local_elem++;
 
+    auto id = elem->subdomain_id();
     const Point & c = elem->vertex_average();
     Real element_volume = elem->volume();
 
+    // find the OpenMC cell at the location 'c' (if any)
     bool error = findCell(c);
 
     // if we didn't find an OpenMC cell here, then we certainly have an uncoupled region
@@ -2161,42 +2152,39 @@ OpenMCCellAverageProblem::mapElemsToCells()
       continue;
     }
 
-    // otherwise, this region may potentially map to OpenMC if we _also_ turned
-    // on coupling for this region; first, determine the phase of this element
-    // and store the information
-    int level = _cell_level;
-    if (level > _particle.n_coord() - 1)
-    {
-      if (isParamValid("lowest_cell_level"))
-        level = _particle.n_coord() - 1;
-      else
-        mooseError("Requested coordinate level of " + Moose::stringify(level) +
-                   " exceeds number of nested coordinate levels at " + printPoint(c) + ": " +
-                   Moose::stringify(_particle.n_coord()));
-    }
-
+    // next, see what type of data is to be sent into OpenMC (to further classify
+    // the type of couling)
     auto phase = elemFeedback(elem);
+
+    bool requires_mapping = phase != coupling::none || _tally_blocks.count(id);
+
+    // get the level in the OpenMC model to fetch mapped cell information. For
+    // uncoupled regions, we know we will be successful in finding a cell (because
+    // we already screened out uncoupled cells), and the id and instance are unused
+    // (so we can just set zero).
+    auto level = requires_mapping ? getCellLevel(c) : 0;
 
     switch (phase)
     {
       case coupling::density_and_temperature:
       {
-        _n_mapped_fluid_elems++;
+        _n_mapped_temp_density_elems++;
         break;
       }
       case coupling::temperature:
       {
-        _n_mapped_solid_elems++;
+        _n_mapped_temp_elems++;
+        break;
+      }
+      case coupling::density:
+      {
+        _n_mapped_density_elems++;
         break;
       }
       case coupling::none:
       {
         _uncoupled_volume += element_volume;
         _n_mapped_none_elems++;
-
-        // we will succeed in finding a valid cell here; for uncoupled regions,
-        // cell_index and cell_instance are unused, so this is just to proceed with program logic
-        level = 0;
         break;
       }
       default:
@@ -2212,13 +2200,13 @@ OpenMCCellAverageProblem::mapElemsToCells()
       _material_cells_only = false;
 
     // store the map of cells to elements that will be coupled via feedback or a tally
-    auto id = elem->subdomain_id();
-    if (phase != coupling::none || _tally_blocks.count(id))
+    if (requires_mapping)
       _cell_to_elem[cell_info].push_back(local_elem);
   }
 
-  _communicator.sum(_n_mapped_solid_elems);
-  _communicator.sum(_n_mapped_fluid_elems);
+  _communicator.sum(_n_mapped_temp_elems);
+  _communicator.sum(_n_mapped_temp_density_elems);
+  _communicator.sum(_n_mapped_density_elems);
   _communicator.sum(_n_mapped_none_elems);
   _communicator.sum(_uncoupled_volume);
 
@@ -2616,13 +2604,13 @@ OpenMCCellAverageProblem::addExternalVariables()
   {
     std::string auxk_type = "CellIDAux";
     InputParameters params = _factory.getValidParams(auxk_type);
-    auto id = addExternalVariable("cell_id");
+    addExternalVariable("cell_id");
     params.set<AuxVariableName>("variable") = "cell_id";
     addAuxKernel(auxk_type, "cell_id", params);
 
     auxk_type = "CellInstanceAux";
     params = _factory.getValidParams(auxk_type);
-    auto instance = addExternalVariable("cell_instance");
+    addExternalVariable("cell_instance");
     params.set<AuxVariableName>("variable") = "cell_instance";
     addAuxKernel(auxk_type, "cell_instance", params);
   }
@@ -2647,7 +2635,7 @@ OpenMCCellAverageProblem::externalSolve()
 std::map<OpenMCCellAverageProblem::cellInfo, Real>
 OpenMCCellAverageProblem::computeVolumeWeightedCellInput(
     const std::map<SubdomainID, std::pair<unsigned int, std::string>> & var_num,
-    const coupling::CouplingFields * phase = nullptr) const
+    const std::vector<coupling::CouplingFields> * phase = nullptr) const
 {
   const auto & sys_number = _aux->number();
 
@@ -2661,7 +2649,7 @@ OpenMCCellAverageProblem::computeVolumeWeightedCellInput(
     // routines to properly shield against incorrect phases
     if (phase)
     {
-      if (cellCouplingFields(c.first) != *phase)
+      if (std::find(phase->begin(), phase->end(), cellFeedback(c.first)) == phase->end())
       {
         volume_product.push_back(0.0 /* dummy value */);
         continue;
@@ -2690,7 +2678,7 @@ OpenMCCellAverageProblem::computeVolumeWeightedCellInput(
 void
 OpenMCCellAverageProblem::sendTemperatureToOpenMC() const
 {
-  if (!_has_fluid_blocks && !_has_solid_blocks)
+  if (!_specified_temperature_feedback)
   {
     _console << "Skipping temperature transfer into OpenMC because 'temperature_blocks' is empty"
              << std::endl;
@@ -2703,13 +2691,15 @@ OpenMCCellAverageProblem::sendTemperatureToOpenMC() const
   double minimum = std::numeric_limits<double>::max();
 
   // collect the volume-temperature product across local ranks
-  std::map<cellInfo, Real> cell_vol_temp = computeVolumeWeightedCellInput(_subdomain_to_temp_vars);
+  std::vector<coupling::CouplingFields> phase = {coupling::temperature,
+                                                 coupling::density_and_temperature};
+  std::map<cellInfo, Real> cell_vol_temp =
+      computeVolumeWeightedCellInput(_subdomain_to_temp_vars, &phase);
 
   for (const auto & c : _cell_to_elem)
   {
     auto cell_info = c.first;
-
-    if (cellCouplingFields(cell_info) == coupling::none)
+    if (!hasTemperatureFeedback(cell_info))
       continue;
 
     Real average_temp = cell_vol_temp.at(cell_info) / _cell_to_elem_volume.at(cell_info);
@@ -2726,10 +2716,8 @@ OpenMCCellAverageProblem::sendTemperatureToOpenMC() const
     containedCells contained_cells = containedMaterialCells(cell_info);
 
     for (const auto & contained : contained_cells)
-    {
       for (const auto & instance : contained.second)
         setCellTemperature(contained.first, instance, average_temp, cell_info);
-    }
   }
 
   if (!_verbose)
@@ -2749,7 +2737,7 @@ OpenMCCellAverageProblem::firstContainedMaterialCell(const cellInfo & cell_info)
 void
 OpenMCCellAverageProblem::sendDensityToOpenMC() const
 {
-  if (!_has_fluid_blocks)
+  if (!_specified_density_feedback)
   {
     _console << "Skipping density transfer into OpenMC because 'density_blocks' is empty"
              << std::endl;
@@ -2762,7 +2750,8 @@ OpenMCCellAverageProblem::sendDensityToOpenMC() const
   double minimum = std::numeric_limits<double>::max();
 
   // collect the volume-density product across local ranks
-  auto phase = coupling::density_and_temperature;
+  std::vector<coupling::CouplingFields> phase = {coupling::density,
+                                                 coupling::density_and_temperature};
   std::map<cellInfo, Real> cell_vol_density = computeVolumeWeightedCellInput(_subdomain_to_density_vars, &phase);
 
   // in case multiple cells are filled by this material, assemble the sum of
@@ -2775,8 +2764,7 @@ OpenMCCellAverageProblem::sendDensityToOpenMC() const
   {
     auto cell_info = c.first;
 
-    // dummy values fill cell_vol_density for the non-fluid cells
-    if (cellCouplingFields(cell_info) != phase)
+    if (!hasDensityFeedback(cell_info))
       continue;
 
     auto mat_idx = _cell_to_material.at(cell_info);
@@ -2797,8 +2785,7 @@ OpenMCCellAverageProblem::sendDensityToOpenMC() const
   {
     auto cell_info = c.first;
 
-    // dummy values fill cell_vol_density for the non-fluid cells
-    if (cellCouplingFields(cell_info) != phase)
+    if (!hasDensityFeedback(cell_info))
       continue;
 
     auto mat_idx = _cell_to_material.at(cell_info);
@@ -2883,7 +2870,8 @@ OpenMCCellAverageProblem::relaxAndNormalizeTally(const int & t, const unsigned i
   auto mean_tally = tallySum(tally, score);
   current_raw = normalizeLocalTally(mean_tally, score);
 
-  auto sum_sq = xt::view(tally->results_, xt::all(), 0, static_cast<int>(openmc::TallyResult::SUM_SQ));
+  auto sum_sq =
+      xt::view(tally->results_, xt::all(), score, static_cast<int>(openmc::TallyResult::SUM_SQ));
   auto rel_err = relativeError(mean_tally, sum_sq, tally->n_realizations_);
   current_raw_std_dev = rel_err * current_raw;
 
@@ -2935,41 +2923,36 @@ OpenMCCellAverageProblem::dufekGudowskiParticleUpdate()
   openmc::settings::n_particles = n;
 }
 
-void
+Real
 OpenMCCellAverageProblem::getTally(const unsigned int & var_num,
-  const std::vector<xt::xtensor<double, 1>> & tally, const unsigned int & score, const bool & print_table)
+                                   const std::vector<xt::xtensor<double, 1>> & tally,
+                                   const unsigned int & score)
 {
-  Real sum = 0.0;
-
   switch (_tally_type)
   {
     case tally::cell:
-    {
-      sum = getCellTally(var_num, tally, score, print_table);
-      break;
-    }
+      return getCellTally(var_num, tally, score);
     case tally::mesh:
-    {
-      sum = getMeshTally(var_num, tally, score, print_table);
-      break;
-    }
+      return getMeshTally(var_num, tally, score);
     default:
       mooseError("Unhandled TallyTypeEnum in OpenMCCellAverageProblem!");
   }
+}
 
+void
+OpenMCCellAverageProblem::checkNormalization(const Real & sum, const unsigned int & score) const
+{
   if (tallyNormalization(score) > ZERO_TALLY_THRESHOLD)
-    if (print_table && _check_tally_sum && std::abs(sum - 1.0) > 1e-6)
+    if (_check_tally_sum && std::abs(sum - 1.0) > 1e-6)
       mooseError("Tally normalization process failed for " + _tally_score[score] + " score! Total fraction of " +
                  Moose::stringify(sum) + " does not match 1.0!");
 }
 
 Real
 OpenMCCellAverageProblem::getCellTally(const unsigned int & var_num,
-  const std::vector<xt::xtensor<double, 1>> & tally, const unsigned int & score, const bool & print_table)
+                                       const std::vector<xt::xtensor<double, 1>> & tally,
+                                       const unsigned int & score)
 {
-  VariadicTable<std::string, Real> vt({"Cell", "Fraction of total " + _tally_score[score]});
-  vt.setColumnFormat({VariadicTableColumnFormat::AUTO, VariadicTableColumnFormat::SCIENTIFIC});
-
   Real total = 0.0;
 
   int i = 0;
@@ -2988,29 +2971,17 @@ OpenMCCellAverageProblem::getCellTally(const unsigned int & var_num,
     Real volumetric_power = local * tallyMultiplier(score) / _cell_to_elem_volume[cell_info];
     total += local;
 
-    vt.addRow(printCell(cell_info), local);
     fillElementalAuxVariable(var_num, c.second, volumetric_power);
   }
-
-  vt.addRow("total", total);
-
-  // do not print a table showing the fractional values for flux, because this tally score
-  // itself is not renormalized to preserve some total integral of flux (so the "fraction"
-  // is a bit of a misnomer)
-  if (_tally_score[score] != "flux")
-    if (_verbose && print_table)
-      vt.print(_console);
 
   return total;
 }
 
 Real
 OpenMCCellAverageProblem::getMeshTally(const unsigned int & var_num,
-  const std::vector<xt::xtensor<double, 1>> & tally, const unsigned int & score, const bool & print_table)
+                                       const std::vector<xt::xtensor<double, 1>> & tally,
+                                       const unsigned int & score)
 {
-  VariadicTable<unsigned int, Real> vt({"Mesh", "Fraction of total " + _tally_score[score]});
-  vt.setColumnFormat({VariadicTableColumnFormat::AUTO, VariadicTableColumnFormat::SCIENTIFIC});
-
   Real total = 0.0;
 
   // TODO: this requires that the mesh exactly correspond to the mesh templates;
@@ -3020,7 +2991,6 @@ OpenMCCellAverageProblem::getMeshTally(const unsigned int & var_num,
   for (unsigned int i = 0; i < _mesh_filters.size(); ++i)
   {
     const auto * filter = _mesh_filters[i];
-    Real template_power_fraction = 0.0;
 
     for (decltype(filter->n_bins()) e = 0; e < filter->n_bins(); ++e)
     {
@@ -3033,23 +3003,13 @@ OpenMCCellAverageProblem::getMeshTally(const unsigned int & var_num,
       Real volumetric_power =
           power_fraction * tallyMultiplier(score) / _mesh_template->volume(e) * _scaling * _scaling * _scaling;
       total += power_fraction;
-      template_power_fraction += power_fraction;
 
       std::vector<unsigned int> elem_ids = {offset + e};
       fillElementalAuxVariable(var_num, elem_ids, volumetric_power);
     }
 
-    vt.addRow(i, template_power_fraction);
-
     offset += filter->n_bins();
   }
-
-  // do not print a table showing the fractional values for flux, because this tally score
-  // itself is not renormalized to preserve some total integral of flux (so the "fraction"
-  // is a bit of a misnomer)
-  if (_tally_score[score] != "flux")
-    if (_verbose && print_table)
-      vt.print(_console);
 
   return total;
 }
@@ -3085,10 +3045,10 @@ OpenMCCellAverageProblem::syncSolutions(ExternalProblem::Direction direction)
 
       sendTallyNuclidesToOpenMC();
 
-      if (_first_transfer && (_has_solid_blocks || _has_fluid_blocks))
+      if (_first_transfer && (_specified_temperature_feedback || _specified_density_feedback))
       {
         std::string incoming_transfer =
-            _has_fluid_blocks ? "temperature and density" : "temperature";
+            _specified_density_feedback ? "temperature and density" : "temperature";
 
         switch (_initial_condition)
         {
@@ -3176,7 +3136,7 @@ OpenMCCellAverageProblem::syncSolutions(ExternalProblem::Direction direction)
       if (_tally_type == tally::none)
         break;
 
-      _console << "Extracting OpenMC tallies... " << printNewline();
+      _console << "Extracting OpenMC tallies...";
 
       for (unsigned int score = 0; score < _tally_score.size(); ++score)
       {
@@ -3206,7 +3166,8 @@ OpenMCCellAverageProblem::syncSolutions(ExternalProblem::Direction direction)
             mooseError("Unhandled TallyTypeEnum in OpenMCCellAverageProblem!");
         }
 
-        getTally(_tally_var[score], _current_tally[score], score, true);
+        auto sum = getTally(_tally_var[score], _current_tally[score], score);
+        checkNormalization(sum, score);
 
         if (_outputs)
         {
@@ -3215,14 +3176,14 @@ OpenMCCellAverageProblem::syncSolutions(ExternalProblem::Direction direction)
             std::string out = (*_outputs)[i];
 
             if (out == "unrelaxed_tally_std_dev")
-              getTally(_external_vars[score][i], _current_raw_tally_std_dev[score], score, false);
+              getTally(_external_vars[score][i], _current_raw_tally_std_dev[score], score);
             if (out == "unrelaxed_tally")
-              getTally(_external_vars[score][i], _current_raw_tally[score], score, false);
+              getTally(_external_vars[score][i], _current_raw_tally[score], score);
           }
         }
       }
 
-      _console << "done" << std::endl;
+      _console << " done" << std::endl;
 
       break;
     }

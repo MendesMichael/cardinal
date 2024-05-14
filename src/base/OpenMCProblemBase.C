@@ -130,14 +130,15 @@ OpenMCProblemBase::OpenMCProblemBase(const InputParameters & params)
       break;
     }
     case openmc::RunMode::PLOTTING:
-      mooseError("Running OpenMC in plotting mode is not supported through Cardinal!\n"
-        "Please just run using the OpenMC executable, like 'openmc --plot'");
+      mooseError("Running OpenMC in plotting mode is not supported through Cardinal! "
+                 "Please just run using the OpenMC executable, like 'openmc --plot'");
     case openmc::RunMode::PARTICLE:
-      mooseError("Running OpenMC in particle restart mode is not supported through Cardinal!\n"
-       "Please just run using the OpenMC executable, like 'openmc --restart <binary_file>'");
+      mooseError(
+          "Running OpenMC in particle restart mode is not supported through Cardinal! "
+          "Please just run using the OpenMC executable, like 'openmc --restart <binary_file>'");
     case openmc::RunMode::VOLUME:
-      mooseError("Running OpenMC in volume calculation mode is not supported through Cardinal!\n"
-        "Please just run using the OpenMC executable, like 'openmc --volume'");
+      mooseError("Running OpenMC in volume calculation mode is not supported through Cardinal! "
+                 "Please just run using the OpenMC executable, like 'openmc --volume'");
     default:
       mooseError("Unhandled openmc::RunMode enum in OpenMCInitAction!");
   }
@@ -154,12 +155,12 @@ OpenMCProblemBase::OpenMCProblemBase(const InputParameters & params)
 
   if (openmc::settings::temperature_range[1] == 0.0)
     mooseWarning(
-      "For multiphysics simulations, we recommend setting the 'temperature_range' in OpenMC's\n"
-      "settings.xml file. This will pre-load nuclear data over a range of temperatures, instead\n"
-      "of only the temperatures defined in the XML file.\n\n"
-      "For efficiency purposes, OpenMC only checks that cell temperatures are within the global\n"
-      "min/max of loaded data, which can be different from data loaded for each nuclide. Run may\n"
-      "abort suddenly if requested nuclear data is not available.");
+        "For multiphysics simulations, we recommend setting the 'temperature_range' in OpenMC's "
+        "settings.xml file. This will pre-load nuclear data over a range of temperatures, instead "
+        "of only the temperatures defined in the XML file.\n\n"
+        "For efficiency purposes, OpenMC only checks that cell temperatures are within the global "
+        "min/max of loaded data, which can be different from data loaded for each nuclide. Run may "
+        "abort suddenly if requested nuclear data is not available.");
 
   if (isParamValid("openmc_verbosity"))
     openmc::settings::verbosity = getParam<unsigned int>("openmc_verbosity");
@@ -382,14 +383,13 @@ OpenMCProblemBase::setCellTemperature(const int32_t & index,
   {
     std::string descriptor =
         "set cell " + printCell(cell_info) + " to temperature " + Moose::stringify(T) + " (K)";
-    mooseError(
-        "In attempting to ",
-        descriptor,
-        ", OpenMC reported:\n\n",
-        std::string(openmc_err_msg) + "\n\n" +
-            "If you are trying to debug a model setup, you can set 'initial_properties = xml' to\n"
-            "use the initial temperature and density in the OpenMC XML files for OpenMC's first "
-            "run");
+    mooseError("In attempting to ",
+               descriptor,
+               ", OpenMC reported:\n\n",
+               std::string(openmc_err_msg) + "\n\n" +
+                   "If you are trying to debug a model setup, you can set 'initial_properties = "
+                   "xml' to use the initial temperature and density in the OpenMC XML files for "
+                   "OpenMC's first run.");
   }
 }
 
@@ -434,7 +434,7 @@ OpenMCProblemBase::setCellDensity(const Real & density, const cellInfo & cell_in
   // because it could be a very common mistake to forget to set an initial condition
   // for density if OpenMC runs first
   if (density <= 0.0)
-    mooseError("Densities less than or equal to zero cannot be set in the OpenMC model!\n cell " +
+    mooseError("Densities less than or equal to zero cannot be set in the OpenMC model!\n\n cell " +
                printCell(cell_info) + " set to density " + Moose::stringify(density) + " (kg/m3)");
 
   int32_t material_index;
@@ -459,14 +459,13 @@ OpenMCProblemBase::setCellDensity(const Real & density, const cellInfo & cell_in
   {
     std::string descriptor = "set material with index " + Moose::stringify(material_index) +
                              " to density " + Moose::stringify(density) + " (kg/m3)";
-    mooseError(
-        "In attempting to ",
-        descriptor,
-        ", OpenMC reported:\n\n",
-        std::string(openmc_err_msg) + "\n\n" +
-            "If you are trying to debug a model setup, you can set 'initial_properties = xml' to\n"
-            "use the initial temperature and density in the OpenMC XML files for OpenMC's first "
-            "run");
+    mooseError("In attempting to ",
+               descriptor,
+               ", OpenMC reported:\n\n",
+               std::string(openmc_err_msg) + "\n\n" +
+                   "If you are trying to debug a model setup, you can set 'initial_properties = "
+                   "xml' to use the initial temperature and density in the OpenMC XML files for "
+                   "OpenMC's first run");
   }
 }
 
@@ -544,17 +543,32 @@ OpenMCProblemBase::tallyMeanAcrossBins(std::vector<openmc::Tally *> tally, const
 }
 
 std::string
-OpenMCProblemBase::tallyScore(const std::string & score) const
+OpenMCProblemBase::enumToTallyScore(const std::string & score) const
 {
+  // the MultiMooseEnum is all caps, but the MooseEnum is already the correct case,
+  // so we need to treat these as separate
   std::string s = score;
-  std::transform(s.begin(), s.end(), s.begin(),
-    [](unsigned char c){ return std::tolower(c); });
+  if (std::all_of(
+          s.begin(), s.end(), [](unsigned char c) { return !std::isalpha(c) || std::isupper(c); }))
+  {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
 
-  // we need to revert back to some letters being uppercase for certain scores
-  if (s == "h3_production")
-    s = "H3_production";
+    // we need to revert back to some letters being uppercase for certain scores
+    if (s == "h3_production")
+      s = "H3_production";
+  }
 
+  // MOOSE enums use underscores, OpenMC uses dashes
   std::replace(s.begin(), s.end(), '_', '-');
+  return s;
+}
+
+std::string
+OpenMCProblemBase::tallyScoreToEnum(const std::string & score) const
+{
+  // MOOSE enums use underscores, OpenMC uses dashes
+  std::string s = score;
+  std::replace(s.begin(), s.end(), '-', '_');
   return s;
 }
 

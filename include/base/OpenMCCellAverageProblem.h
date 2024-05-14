@@ -81,6 +81,16 @@ public:
                              std::vector<std::vector<SubdomainName>> & names,
                              std::vector<SubdomainID> & flattened_ids);
 
+  /**
+   * Check that the specified blocks are in the mesh
+   * @param[in] name name for throwing an error
+   * @param[in] ids block IDs to check
+   * @param[in] names block subdomain names for throwing an error
+   */
+  void checkBlocksInMesh(const std::string name,
+                         const std::vector<SubdomainID> & ids,
+                         const std::vector<SubdomainName> & names) const;
+
   /// Initialize the mapping of OpenMC to the MooseMesh and perform additional setup actions
   void setupProblem();
 
@@ -212,7 +222,31 @@ public:
    * @param[in] cell_info cell index, instance pair
    * @return coupling fields
    */
-  coupling::CouplingFields cellCouplingFields(const cellInfo & cell_info) const;
+  coupling::CouplingFields cellFeedback(const cellInfo & cell_info) const;
+
+  /**
+   * Whether a cell has density feedback
+   * @param[in] cell_info cell index,instance pair
+   * @return if cell has density feedback
+   */
+  bool hasDensityFeedback(const cellInfo & cell_info) const
+  {
+    std::vector<coupling::CouplingFields> phase = {coupling::density,
+                                                   coupling::density_and_temperature};
+    return std::find(phase.begin(), phase.end(), cellFeedback(cell_info)) != phase.end();
+  }
+
+  /**
+   * Whether a cell has temperature feedback
+   * @param[in] cell_info cell index,instance pair
+   * @return if cell has temperature feedback
+   */
+  bool hasTemperatureFeedback(const cellInfo & cell_info) const
+  {
+    std::vector<coupling::CouplingFields> phase = {coupling::temperature,
+                                                   coupling::density_and_temperature};
+    return std::find(phase.begin(), phase.end(), cellFeedback(cell_info)) != phase.end();
+  }
 
   /**
    * Get the local tally
@@ -240,6 +274,27 @@ public:
   static constexpr int32_t UNMAPPED{-1};
 
 protected:
+  /**
+   * Get the cell level in OpenMC to use for coupling
+   * @param[in] c point
+   * @return cell level
+   */
+  unsigned int getCellLevel(const Point & c) const;
+
+  /**
+   * Read the names of the MOOSE variables used for sending feedback into OpenMC
+   * @param[in] param feedback term to read
+   * @param[in] default_name default name to use for MOOSE variables holding this field
+   * @param[out] vars_to_specified_blocks map from MOOSE variable names to the blocks on which they
+   * are defined
+   * @param[out] specified_blocks user-specified blocks for feedback
+   */
+  void
+  readBlockVariables(const std::string & param,
+                     const std::string & default_name,
+                     std::map<std::string, std::vector<SubdomainName>> & vars_to_specified_blocks,
+                     std::vector<SubdomainID> & specified_blocks);
+
   /**
    * Whether this cell has an identical fill
    * @param[in] cell_info cell index, instance pair
@@ -303,40 +358,41 @@ protected:
    * @param[in] var_num variable name to write
    * @param[in] tally tally values to write
    * @param[in] score tally score
-   * @param[in] print_table whether to print the diagnostic table showing tally values by bin
    * @return sum of the tally
    */
   Real getCellTally(const unsigned int & var_num,
                     const std::vector<xt::xtensor<double, 1>> & tally,
-                    const unsigned int & score,
-                    const bool & print_table);
+                    const unsigned int & score);
 
   /**
    * Read from an OpenMC mesh tally and write into an elemental aux variable
    * @param[in] var_num variable name to write
    * @param[in] tally tally values to write
    * @param[in] score tally score
-   * @param[in] print_table whether to print the diagnostic table showing tally values by bin
    * @return sum of the tally
    */
   Real getMeshTally(const unsigned int & var_num,
                     const std::vector<xt::xtensor<double, 1>> & tally,
-                    const unsigned int & score,
-                    const bool & print_table);
+                    const unsigned int & score);
 
   /**
-   * Extract the (cell or mesh) tally from OpenMC and then apply to the corresponding MOOSE
-   * elements. We also check that the tally normalization gives a total tally sum of 1.0 (when
-   * normalized against the total tally value).
+   * Extract the tally from OpenMC and then apply to the corresponding MOOSE elements.
    * @param[in] var_num variable name to write
    * @param[in] tally tally values to write
    * @param[in] score tally score
-   * @param[in] print_table whether to print the diagnostic table showing tally values by bin
+   * @return sum sum of the tally
    */
-  void getTally(const unsigned int & var_num,
+  Real getTally(const unsigned int & var_num,
                 const std::vector<xt::xtensor<double, 1>> & tally,
-                const unsigned int & score,
-                const bool & print_table);
+                const unsigned int & score);
+
+  /**
+   * Check that the tally normalization gives a total tally sum of 1.0 (when normalized
+   * against the total tally value).
+   * @param[in] sum sum of the tally
+   * @param[in] score tally score
+   */
+  void checkNormalization(const Real & sum, const unsigned int & score) const;
 
   /**
    * Get the mesh filter(s) for tallies automatically constructed by Cardinal.
@@ -407,9 +463,8 @@ protected:
    * Read the block parameters based on user settings
    * @param[in] name name of input parameter representing a vector of subdomain names
    * @param[in] blocks list of block ids to write
-   * @param[out] names subdomain names
    */
-  void readBlockParameters(const std::string name, std::unordered_set<SubdomainID> & blocks, std::vector<SubdomainName> & names);
+  void readBlockParameters(const std::string name, std::unordered_set<SubdomainID> & blocks);
 
   /**
    * Cache the material cells contained within each coupling cell;
@@ -563,12 +618,12 @@ protected:
   /**
    * Compute the product of volume with a field across ranks and sum into a global map
    * @param[in] var_num variable to weight with volume, mapped by subdomain ID
-   * @param[in] phase phase to compute the operation for
+   * @param[in] phase phases to compute the operation for
    * @return volume-weighted field for each cell, in a global sense
    */
   std::map<cellInfo, Real> computeVolumeWeightedCellInput(
       const std::map<SubdomainID, std::pair<unsigned int, std::string>> & var_num,
-      const coupling::CouplingFields * phase) const;
+      const std::vector<coupling::CouplingFields> * phase) const;
 
   /**
    * Send temperature from MOOSE to OpenMC by computing a volume average
@@ -818,17 +873,14 @@ protected:
    * Whether the problem has density feedback blocks specified; note that this is NOT necessarily
    * indicative that the mapping was successful in finding any cells corresponding to those blocks
    */
-  const bool _has_fluid_blocks;
+  const bool _specified_density_feedback;
 
   /**
    * Whether the problem has temperature feedback blocks specified; note that this is NOT
    * necessarily indicative that the mapping was successful in finding any cells corresponding to
    * those blocks
    */
-  const bool _has_solid_blocks;
-
-  /// Whether any cell tallies are added to the problem
-  const bool _has_tally_blocks;
+  const bool _specified_temperature_feedback;
 
   /// Whether any spatial mapping from OpenMC's cells to the mesh is needed
   const bool _needs_to_map_cells;
@@ -854,9 +906,6 @@ protected:
   /// Blocks in MOOSE mesh that provide temperature feedback
   std::vector<SubdomainID> _temp_blocks;
 
-  /// Blocks in MOOSE mesh that provide temperature feedback, but not density feedback
-  std::vector<SubdomainID> _exclusive_temp_blocks;
-
   /// Blocks for which to add (cell) tallies
   std::unordered_set<SubdomainID> _tally_blocks;
 
@@ -869,11 +918,14 @@ protected:
   /// Phase of each cell
   std::map<cellInfo, coupling::CouplingFields> _cell_phase;
 
+  /// Number of elements in the MOOSE mesh that exclusively provide density feedback
+  int _n_moose_density_elems;
+
   /// Number of elements in the MOOSE mesh that exclusively provide temperature feedback
-  int _n_moose_solid_elems;
+  int _n_moose_temp_elems;
 
   /// Number of elements in the MOOSE mesh which provide temperature+density feedback
-  int _n_moose_fluid_elems;
+  int _n_moose_temp_density_elems;
 
   /// Number of no-coupling elements in the MOOSE mesh
   int _n_moose_none_elems;
@@ -882,13 +934,19 @@ protected:
    * Number of MOOSE elements that exclusively provide temperature feedback,
    * and which successfully mapped to OpenMC cells
    */
-  int _n_mapped_solid_elems;
+  int _n_mapped_temp_elems;
+
+  /**
+   * Number of MOOSE elements that exclusively provide density feedback,
+   * and which successfully mapped to OpenMC cells
+   */
+  int _n_mapped_density_elems;
 
   /**
    * Number of MOOSE elements that provide temperature+density feedback,
    * and which successfully mapped to OpenMC cells
    */
-  int _n_mapped_fluid_elems;
+  int _n_mapped_temp_density_elems;
 
   /// Number of no-coupling elements mapped to OpenMC cells
   int _n_mapped_none_elems;
@@ -952,7 +1010,8 @@ protected:
 
   /**
    * Local tallies; multiple tallies will only exist when
-   * translating multiple unstructured meshes throughout the geometry
+   * translating multiple unstructured meshes throughout the geometry. Each tally
+   * may have multiple scores which are simultaneously tracked.
    */
   std::vector<openmc::Tally *> _local_tally;
 
@@ -1051,10 +1110,13 @@ protected:
   const SymmetryPointGenerator * _symmetry;
 
   /// Number of temperature-only feedback elements in each mapped OpenMC cell (global)
-  std::map<cellInfo, int> _n_solid;
+  std::map<cellInfo, int> _n_temp;
+
+  /// Number of density-only feedback elements in each mapped OpenMC cell (global)
+  std::map<cellInfo, int> _n_rho;
 
   /// Number of temperature+density feedback elements in each mapped OpenMC cell (global)
-  std::map<cellInfo, int> _n_fluid;
+  std::map<cellInfo, int> _n_temp_rho;
 
   /// Number of none elements in each mapped OpenMC cell (global)
   std::map<cellInfo, int> _n_none;
