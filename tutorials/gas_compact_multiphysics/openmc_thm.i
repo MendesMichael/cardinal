@@ -1,8 +1,10 @@
+!include common_input.i
+
 # This input file runs coupled OpenMC Monte Carlo transport, MOOSE heat
 # conduction, and THM fluid flow and heat transfer.
 # This input should be run with:
 #
-# cardinal-opt -i common_input.i openmc_thm.i
+# cardinal-opt -i openmc_thm.i
 
 num_layers_for_THM = 150
 num_layers = 50
@@ -94,15 +96,10 @@ unit_cell_power = ${fparse power / (n_bundles * n_coolant_channels_per_block) * 
 
 [Problem]
   type = OpenMCCellAverageProblem
-  output = 'unrelaxed_tally_std_dev'
-  check_equal_mapped_tally_volumes = true
 
   power = ${unit_cell_power}
   scaling = 100.0
   density_blocks = ${density_blocks}
-  tally_blocks = ${fuel_blocks}
-  tally_type = cell
-  tally_name = heat_source
   cell_level = 1
 
   relaxation = robbins_monro
@@ -112,11 +109,24 @@ unit_cell_power = ${fparse power / (n_bundles * n_coolant_channels_per_block) * 
 
   k_trigger = std_dev
   k_trigger_threshold = 7.5e-4
-  tally_trigger = rel_err
-  tally_trigger_threshold = 1e-2
   batches = 40
   max_batches = 100
   batch_interval = 5
+
+  [Tallies]
+    [heat_source]
+      type = CellTally
+      blocks = ${fuel_blocks}
+      name = heat_source
+
+      check_equal_mapped_tally_volumes = true
+
+      trigger = rel_err
+      trigger_threshold = 1e-2
+
+      output = 'unrelaxed_tally_std_dev'
+    []
+  []
 []
 
 [Executioner]
@@ -132,13 +142,11 @@ unit_cell_power = ${fparse power / (n_bundles * n_coolant_channels_per_block) * 
 [MultiApps]
   [bison]
     type = TransientMultiApp
-    app_type = CardinalApp
     input_files = 'solid_thm.i'
     execute_on = timestep_begin
   []
   [thm]
     type = FullSolveMultiApp
-    app_type = CardinalApp
     input_files = 'thm.i'
     execute_on = timestep_end
     max_procs_per_app = 1

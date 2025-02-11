@@ -33,8 +33,7 @@
   [missing_vol]
     type = RunException
     input = no_vol.i
-    expect_err = "To display the actual OpenMC cell volumes, the \[Problem\] block needs to set the\n"
-                 "'volume_calculation' parameter."
+    expect_err = "To display the actual OpenMC cell volumes"
     requirement = "The system shall error if trying to view stochastic volumes without the stochastic "
                   "volume calculation having been created."
     required_objects = 'OpenMCCellAverageProblem'
@@ -45,6 +44,13 @@
     csvdiff = rel_err_out.csv
     cli_args = 'UserObjects/vol/trigger=rel_err UserObjects/vol/trigger_threshold=1e-2 Outputs/file_base=rel_err_out'
     requirement = "The system shall terminate the stochastic volume calculation using a relative error metric."
+    required_objects = 'OpenMCCellAverageProblem'
+  []
+  [user_bb]
+    type = CSVDiff
+    input = user_bb.i
+    csvdiff = user_bb_out.csv
+    requirement = "The system shall correctly compute volumes in OpenMC when using a user-provided bounding box."
     required_objects = 'OpenMCCellAverageProblem'
   []
 []

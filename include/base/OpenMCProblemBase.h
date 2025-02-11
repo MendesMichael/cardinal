@@ -24,7 +24,8 @@
 #include "PostprocessorInterface.h"
 #include "CardinalEnums.h"
 #include "OpenMCNuclideDensities.h"
-#include "OpenMCTallyNuclides.h"
+#include "OpenMCDomainFilterEditor.h"
+#include "OpenMCTallyEditor.h"
 
 #include "mpi.h"
 #include "openmc/bank.h"
@@ -70,8 +71,14 @@ public:
   void catchOpenMCError(const int & err, const std::string descriptor) const;
 
   /**
+   * Whether the score is a reaction rate score
+   * @return whether the tally from OpenMC has units of 1/src
+   */
+  bool isReactionRateScore(const std::string & score) const;
+
+  /**
    * Whether the score is a heating-type score
-   * @return whether tally from OpenMC has units of eV/src
+   * @return whether the tally from OpenMC has units of eV/src
    */
   bool isHeatingScore(const std::string & score) const;
 
@@ -84,17 +91,16 @@ public:
   unsigned int addExternalVariable(const std::string & name, const std::vector<SubdomainName> * block = nullptr);
 
   /**
-   * Create an openmc::LibMesh mesh
-   * @param[in] filename file name to construct the mesh from; if nullptr, uses [Mesh]
-   * @return OpenMC libMesh mesh
-   */
-  std::unique_ptr<openmc::LibMesh> tallyMesh(const std::string * filename = nullptr) const;
-
-  /**
    * Get the scaling value applied to the [Mesh] to convert to OpenMC's centimeters units
    * @return scaling value
    */
   const Real & scaling() const { return _scaling; }
+
+  /**
+   * Whether the problem has user defined scaling or not.
+   * @return whether the user has set the problem scaling or not
+   */
+  bool hasScaling() const { return _specified_scaling; }
 
   /**
    * Convert from a MOOSE-type enum into a valid OpenMC tally score string
@@ -134,6 +140,13 @@ public:
    * @return OpenMC enum
    */
   openmc::TallyEstimator tallyEstimator(tally::TallyEstimatorEnum estimator) const;
+
+  /**
+   * Convert a tally estimator to a string (for output purposes).
+   * @param[in] estimator OpenMC tally estimator enum
+   * @return a string form of the OpenMC tally estimator enum
+   */
+  std::string estimatorToString(openmc::TallyEstimator estimator) const;
 
   /// Run a k-eigenvalue OpenMC simulation
   void externalSolve() override;
@@ -185,11 +198,11 @@ public:
   bool cellIsVoid(const cellInfo & cell_info) const;
 
   /**
-   * Get the cell instance filter corresponding to provided cells
-   * @param[in] tally_cells cells to add to the filter
-   * @return cell instance filter
+   * Whether this cell has zero instances
+   * @param[in] cell_info cell info
+   * @return whether this cell has zero instances
    */
-  openmc::Filter * cellInstanceFilter(const std::vector<cellInfo> & tally_cells) const;
+  bool cellHasZeroInstances(const cellInfo & cell_info) const;
 
   /**
    * Get the material name given its index. If the material does not have a name,
@@ -258,12 +271,6 @@ public:
    * @param[in] filename file name
    */
   void writeSourceBank(const std::string & filename);
-
-  /**
-   * Get the path output
-   * @return path output
-   */
-  std::string pathOutput() const { return _path_output; }
 
   /**
    * Get the total (i.e. summed across all ranks, if distributed)
@@ -336,25 +343,36 @@ public:
    */
   long unsigned int numCells() const;
 
+  /**
+   * Return all IDs of all Cardinal-mapped Tallies
+   * @return all Cardinal-mapped Tally IDs
+   */
+  virtual std::vector<int32_t> getMappedTallyIDs() const = 0;
+
 protected:
   /// Find all userobjects which are changing OpenMC data structures
   void getOpenMCUserObjects();
+
+  /// Ensure that the IDs of OpenMC objects in UserObjects don't clash
+  void checkOpenMCUserObjectIDs() const;
+
+  /// Ensure that any tally editors don't apply to Cardinal-mapped tallies
+  void checkTallyEditorIDs() const;
+
+  /// Execute all filter editor userobjects
+  void executeFilterEditors();
+
+  /// Execute all tally editor userobjects
+  void executeTallyEditors();
+
+  // execute tallly and filte editors
+  void executeEditors();
 
   /// Set the nuclide densities for any materials being modified via MOOSE
   void sendNuclideDensitiesToOpenMC();
 
   /// Set the tally nuclides for any tallies being modified via MOOSE
   void sendTallyNuclidesToOpenMC();
-
-  /**
-   * Add tally
-   * @param[in] score score type
-   * @param[in] filters tally filters
-   * @param[in] estimator estimator
-   * @return tally, which has been added to OpenMC, but may want to still be queried from Cardinal
-   */
-  openmc::Tally * addTally(const std::vector<std::string> & score,
-    std::vector<openmc::Filter *> & filters, const openmc::TallyEstimator & estimator);
 
   /**
    * Set an auxiliary elemental variable to a specified value
@@ -372,14 +390,12 @@ protected:
    */
   std::string sourceBankFileName() const
   {
-    return _path_output + "initial_source_" + std::to_string(_fixed_point_iteration) + ".h5";
+    return openmc::settings::path_output + "initial_source_" +
+           std::to_string(_fixed_point_iteration) + ".h5";
   }
 
   /// Whether to print diagnostic information about model setup and the transfers
   const bool & _verbose;
-
-  /// Type of tally to apply to extract score from OpenMC
-  const tally::TallyTypeEnum _tally_type;
 
   /// Power by which to normalize the OpenMC results, for k-eigenvalue mode
   const Real * _power;
@@ -420,6 +436,9 @@ protected:
    */
   const Real & _scaling;
 
+  /// Whether to skip writing statepoints from OpenMC
+  const bool & _skip_statepoint;
+
   /**
    * Fixed point iteration index used in relaxation; because we sometimes run OpenMC
    * in a pseudo-transient coupling with NekRS, we simply increment this by 1 each
@@ -435,15 +454,6 @@ protected:
   long unsigned int _n_openmc_cells;
 
   /**
-   * Whether the OpenMC model consists of a single coordinate level; this can
-   * in some cases be used for more verbose error messages
-   */
-  bool _single_coord_level;
-
-  /// Directory where OpenMC output files are written
-  std::string _path_output;
-
-  /**
    * Number of digits to use to display the cell ID for diagnostic messages; this is
    * estimated conservatively based on the total number of cells, even though there
    * may be distributed cells such that the maximum cell ID is far smaller than the
@@ -457,8 +467,11 @@ protected:
   /// Userobjects for changing OpenMC material compositions
   std::vector<OpenMCNuclideDensities *> _nuclide_densities_uos;
 
-  /// Userobjects for changing OpenMC tally nuclides
-  std::vector<OpenMCTallyNuclides *> _tally_nuclides_uos;
+  /// Userobjects for creating/changing OpenMC filters
+  std::vector<OpenMCDomainFilterEditor *> _filter_editor_uos;
+
+  /// Userobjects for creating/changing OpenMC tallies
+  std::vector<OpenMCTallyEditor *> _tally_editor_uos;
 
   /// Mapping from local element indices to global element indices for this rank
   std::vector<unsigned int> _local_to_global_elem;

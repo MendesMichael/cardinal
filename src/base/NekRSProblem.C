@@ -19,15 +19,7 @@
 #ifdef ENABLE_NEK_COUPLING
 
 #include "NekRSProblem.h"
-#include "Moose.h"
-#include "AuxiliarySystem.h"
-#include "TimeStepper.h"
-#include "NekInterface.h"
-#include "TimedPrint.h"
-#include "MooseUtils.h"
-#include "CardinalUtils.h"
 #include "DisplacedProblem.h"
-#include "UserErrorChecking.h"
 
 #include "nekInterface/nekInterfaceAdapter.hpp"
 
@@ -44,9 +36,7 @@ NekRSProblem::validParams()
                         true,
                         "Whether a heat source will be applied to the NekRS domain. "
                         "We allow this to be turned off so that we don't need to add an OCCA "
-                        "source kernel if we know the "
-                        "heat source in the NekRS domain is zero anyways (such as if NekRS only "
-                        "solves for the fluid and we have solid fuel).");
+                        "source kernel if we know the heat source in the NekRS domain is zero.");
 
   params.addRangeCheckedParam<Real>("normalization_abs_tol", 1e-8, "normalization_abs_tol > 0",
     "Absolute tolerance for checking if the boundary heat flux and volumetric heat sources "
@@ -67,6 +57,8 @@ NekRSProblem::validParams()
     "Whether to conserve the heat flux by individual sideset (as opposed to lumping all sidesets "
     "together). Setting this option to true requires syntax changes in the input file to use "
     "vector postprocessors, and places restrictions on how the sidesets are set up.");
+  params.addClassDescription("Couple NekRS to MOOSE through 3-D boundary or volume data transfers "
+                             "for temperature, heat flux, and geometry");
   return params;
 }
 
@@ -193,12 +185,10 @@ NekRSProblem::initialSetup()
   // the solve is turned off because this is really only a testing feature.
   bool has_temperature_solve = nekrs::hasTemperatureSolve();
   if (!has_temperature_solve)
-    mooseWarning(
-        "By setting 'solver = none' for temperature in '" + _casename +
-        ".par', nekRS "
-        "will not solve for temperature.\n\nThe temperature transferred to MOOSE will remain "
-        "fixed at its initial condition, and the heat flux\nand power transferred to nekRS will be "
-        "unused.");
+    mooseWarning("By setting 'solver = none' for temperature in '" + _casename +
+                 ".par', nekRS will not solve for temperature.\n\nThe fluid wall temperature "
+                 "transferred to MOOSE will remain fixed at its initial condition, and the heat "
+                 "flux and power transferred to nekRS will be unused.");
 
   // For boundary-based coupling, we should check that the correct flux boundary
   // condition is set on all of nekRS's boundaries. To avoid throwing this

@@ -21,7 +21,7 @@ OpenMC separately, or using its conda environment (i.e., do
 
 !alert! note title=tldr
 
-On *CPU systems*, all that you need to compile Cardinal is:
+All that you need to compile Cardinal is:
 
 ```
 conda activate moose
@@ -31,12 +31,13 @@ cd cardinal
 ./scripts/get-dependencies.sh
 export ENABLE_NEK=false
 export HDF5_ROOT=$CONDA_PREFIX
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 make -j8
 ```
 
 If the above produces a `cardinal-opt` Cardinal executable, you can
-jump straight to [#running]. If you are on a GPU system, want to customize the
-build, or were not successful with the above, please consult the detailed instructions
+jump straight to [#running]. If you want to customize the
+build or were not successful with the above, please consult the detailed instructions
 that follow.
 !alert-end!
 
@@ -48,15 +49,7 @@ To get MOOSE's conda environment, follow the instructions [here](https://moosefr
 
 ## Prerequisites
 
-The basic prerequisites for building Cardinal are summarized in [prereq_table].
-
-!table id=prereq_table caption=Summary of prerequisites needed for Cardinal.
-|    | Building with NekRS | Building with OpenMC | Both |
-| :- | :- | :- | :- |
-| CMake | $\checkmark$ | $\checkmark$ | $\checkmark$ |
-| GNU fortran >= 9.0 compiler | $\checkmark$ | &nbsp; | $\checkmark$  |
-| HDF5 | &nbsp; | $\checkmark$ | $\checkmark$ |
-| MPI | $\checkmark$ | $\checkmark$ | $\checkmark$ |
+!include cardinal_prereqs.md
 
 !alert! tip title=How do I know if I have these dependencies?
 You will already have all of these if using MOOSE's conda environment.

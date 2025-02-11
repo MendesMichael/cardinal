@@ -57,6 +57,13 @@ dfloat * getSgeo();
 dfloat * getVgeo();
 
 /**
+ * Check that the field specified can be accessed, e.g., if a user is requesting
+ * to access temperature, the problem must have a temperature variable
+ * @param[in] field field to check
+ */
+void checkFieldValidity(const field::NekFieldEnum & field);
+
+/**
  * Set the absolute tolerance for checking energy conservation in data transfers to Nek
  * @param[in] tol tolerance
  */
@@ -522,7 +529,8 @@ double sideMassFluxWeightedIntegral(const std::vector<int> & boundary_id,
 
 /**
  * Compute the integral of pressure on a surface, multiplied by the unit normal
- * of the surface with a specified direction vector.
+ * of the surface with a specified direction vector. This represents the force
+ * that the fluid exerts ON the boundary.
  * @param[in] boundary_id NekRS boundary IDs for which to perform the integral
  * @param[in] direction unit vector to dot with the boundary surface normal
  * @param[in] pp_mesh which NekRS mesh to operate on
@@ -820,6 +828,27 @@ double velocity_z(const int id);
  * @return velocity magnitude at index
  */
 double velocity(const int id);
+
+/**
+ * Get the x-velocity squared at given GLL index
+ * @param[in] id GLL index
+ * @return square of x-velocity at index
+ */
+double velocity_x_squared(const int id);
+
+/**
+ * Get the y-velocity squared at given GLL index
+ * @param[in] id GLL index
+ * @return square of y-velocity at index
+ */
+double velocity_y_squared(const int id);
+
+/**
+ * Get the z-velocity squared at given GLL index
+ * @param[in] id GLL index
+ * @return square of z-velocity at index
+ */
+double velocity_z_squared(const int id);
 
 /**
  * Write a value into the user scratch space that holds the flux

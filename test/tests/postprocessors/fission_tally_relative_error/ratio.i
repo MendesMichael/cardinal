@@ -15,14 +15,19 @@
 [Problem]
   type = OpenMCCellAverageProblem
   power = 100.0
-  tally_blocks = '1'
   cell_level = 0
-  tally_type = cell
   check_tally_sum = false
 
-  tally_score = 'heating kappa_fission'
-  output = 'unrelaxed_tally_std_dev'
   initial_properties = xml
+
+  [Tallies]
+    [Cell]
+      type = CellTally
+      blocks = '1'
+      score = 'heating kappa_fission'
+      output = 'unrelaxed_tally_std_dev'
+    []
+  []
 []
 
 # the ratio of the std_dev variable and the output tally should give
@@ -89,6 +94,11 @@
     value_type = min
     tally_score = 'heating'
   []
+  [avg_ht]
+    type = TallyRelativeError
+    value_type = average
+    tally_score = 'heating'
+  []
   [max_kf]
     type = TallyRelativeError
     value_type = max
@@ -97,6 +107,11 @@
   [min_kf]
     type = TallyRelativeError
     value_type = min
+    tally_score = 'kappa_fission'
+  []
+  [avg_kf]
+    type = TallyRelativeError
+    value_type = average
     tally_score = 'kappa_fission'
   []
 []

@@ -19,8 +19,6 @@
 #ifdef ENABLE_NEK_COUPLING
 
 #include "NekRSStandaloneProblem.h"
-#include "NekInterface.h"
-#include "UserErrorChecking.h"
 
 registerMooseObject("CardinalApp", NekRSStandaloneProblem);
 
@@ -28,6 +26,8 @@ InputParameters
 NekRSStandaloneProblem::validParams()
 {
   InputParameters params = NekRSProblemBase::validParams();
+  params.addClassDescription(
+      "Run NekRS as a MOOSE application, without coupling, such as for data postprocessing");
   return params;
 }
 

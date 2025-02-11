@@ -2,12 +2,13 @@
 
 In this tutorial, you will learn how to:
 
-- Couple NekRS with MOOSE for [!ac](CHT) for laminar flow over a single heated pebble
+- Couple NekRS with MOOSE for [!ac](CHT)
+- Compute a heat transfer coefficient using NekRS
 
 To access this tutorial,
 
 ```
-cd cardinal/tutorials/pebble_1
+cd cardinal/tutorials/pebble_cht
 ```
 
 ## Geometry and Computational Model
@@ -27,30 +28,14 @@ pebble is not shown). The sideset numbering in the fluid domain is:
   style=width:30%;margin-left:auto;margin-right:auto;halign:center
 
 NekRS shall solve for laminar flow over this pebble. Details on the problem
-specifications are given in [table1]. The inlet velocity is specified such that
-the Reynolds number is $Re=50$.
+specifications are given in a [previous tutorial](nek_intro.md). The inlet velocity is specified such that the Reynolds number is $Re=50$. If you have not
+reviewed this prior tutorial, we highly recommend doing so before proceeding.
 
 The MOOSE heat transfer module shall be used to solve for the solid temperature.
 NekRS and MOOSE will be coupled through boundary conditions on the pebble surface;
 NekRS shall compute a pebble surface temperature to be applied as a Dirichlet condition
 to MOOSE, while MOOSE shall compute a pebble surface heat flux to be applied
 as a Neumann condition in NekRS.
-The pebble power is selected to
-give a pebble power of approximately 223 W (giving a bulk fluid temperature rise
-of 50 K).
-
-!table id=table1 caption=Geometric and operating conditions for the single-pebble flow
-| Parameter | Value |
-| :- | :- |
-| Pebble diameter | 0.03 m |
-| Domain height | 0.4306 m |
-| Inlet flow area | 0.00064009 m |
-| Inlet velocity | 0.001666 m/s |
-| Fluid viscosity | 1e-3 Pa-s |
-| Fluid density | 1000 kg/m$^3$ |
-| Fluid thermal conductivity | 0.6 W/m/K |
-| Fluid volumetric specific heat | 4186 J/kg/K |
-| Pebble power density | 15774023 W/m$^3$ |
 
 ## CHT Coupling
 
@@ -68,22 +53,11 @@ The above sequence is repeated until convergence.
 
 NekRS is used to solve the [incompressible Navier-Stokes equations](theory/ins.md).
 We already created the
-input files for NekRS in the [NekRS introduction tutorial](tutorials/nek_intro.md).
+input files for NekRS in the [NekRS introduction tutorial](nek_intro.md).
 If you have not reviewed this tutorial, please be sure to do so before proceeding.
 We will only describe the aspects of our NekRS setup which *differ* from this
-previous tutorial.
-
-In order to keep our files separate, we will use `pebble_cht` as our casename here.
-
-#### .par File
-
-Our `.par` file is the same as the [standalone NekRS tutorial](tutorials/nek_intro.md)
-except that we will point to the same mesh, `.udf`, and `.usr` files from before by specifying
-the `file`, `udf`, and `usr` parameters.
-
-!listing /tutorials/pebble_1/pebble_cht.par
-
-### .oudf File
+previous tutorial. The `.par`, `.udf`, and `.usr` files are identical from
+the prior tutorial.
 
 For conjugate heat transfer coupling to MOOSE, we only need to change one line
 in the NekRS `.oudf` file to apply a heat flux boundary condition
@@ -104,32 +78,32 @@ application is specified in a "thin" MOOSE-type input file (which we named `nek.
 for this example).
 
 A mirror of the NekRS mesh
-is constructed using the [NekRSMesh](/mesh/NekRSMesh.md). The
+is constructed using the [NekRSMesh](NekRSMesh.md). The
 `boundary` parameter indicates the boundaries through which NekRS is coupled
 via conjugate heat transfer to MOOSE.
 
-!listing /tutorials/pebble_1/nek.i
+!listing /tutorials/pebble_cht/nek.i
   block=Mesh
 
 !alert note
 Note that `pebble.re2` does not appear anywhere in `nek.i` - the `pebble.re2` file is
-a mesh used directly by NekRS, while [NekRSMesh](/mesh/NekRSMesh.md) is a mirror of the boundaries in `pebble.re2`
+a mesh used directly by NekRS, while [NekRSMesh](NekRSMesh.md) is a mirror of the boundaries in `pebble.re2`
 through which boundary coupling with MOOSE will be performed.
 
-Next, the [Problem](https://mooseframework.inl.gov/syntax/Problem/index.html)
+Next, the [Problem](Problem/index.md)
  block describes all objects necessary for the actual physics solve.
 To replace MOOSE finite element calculations with NekRS
-spectral element calculations, the [NekRSProblem](problems/NekRSProblem.md) class is used.
+spectral element calculations, the [NekRSProblem](NekRSProblem.md) class is used.
 The `casename` is used to supply the file name prefix for
 the NekRS input files.
 
-!listing /tutorials/pebble_1/nek.i
+!listing /tutorials/pebble_cht/nek.i
   start=Problem
   end=Executioner
 
-Next, a [Transient](https://mooseframework.inl.gov/source/executioners/Transient.html) executioner
+Next, a [Transient](Transient.md) executioner
 is specified. This is the same executioner used for most transient MOOSE simulations, except now a
-different time stepper is used - [NekTimeStepper](/timesteppers/NekTimeStepper.md).
+different time stepper is used - [NekTimeStepper](NekTimeStepper.md).
 This time stepper simply
 reads the time step specified in NekRS's `.par` file.
 Except for synchronziation points
@@ -140,7 +114,7 @@ in the `.par` file
 are actually ignored, so that the main MOOSE application controls when
 the simulation terminates.
 
-!listing /tutorials/pebble_1/nek.i
+!listing /tutorials/pebble_cht/nek.i
   block=Executioner
 
 An Exodus II output format is specified.
@@ -148,13 +122,13 @@ It is important to note that this output file only outputs the NekRS solution fi
 been interpolated onto the mesh mirror; the solution over the entire NekRS domain is output
 with the usual field file format used by standalone NekRS calculations.
 
-!listing /tutorials/pebble_1/nek.i
+!listing /tutorials/pebble_cht/nek.i
   block=Outputs
 
 You will likely notice that many of the almost-always-included MOOSE blocks are absent
 from the `nek.i` input file - for instance, there are no nonlinear or auxiliary variables
 in the input file.
-The [NekRSProblem](/problems/NekRSProblem.md) class assists in input file setup by declaring many of these coupling fields
+The [NekRSProblem](NekRSProblem.md) class assists in input file setup by declaring many of these coupling fields
 automatically. For this example, two auxiliary variables named `temp` and `avg_flux` are
 added automatically, as if the following were included in the input file:
 
@@ -167,7 +141,7 @@ added automatically, as if the following were included in the input file:
 []
 
 These variables receive incoming and outgoing transfers to/from NekRS; the order is set
-to match the order of the [NekRSMesh](/mesh/NekRSMesh.md).
+to match the order of the [NekRSMesh](NekRSMesh.md).
 A postprocessor named `flux_integral`
 is also added automatically to receive the value of the heat flux
 integral from MOOSE for internal normalization in NekRS. It is as if the following is added
@@ -198,13 +172,13 @@ You can use similar syntax to do math inside a MOOSE input file. For example, to
 a location in the input file with half the value held by the file-local variable
 `pebble_diameter`, you would write `${fparse 0.5 * pebble_diameter}`.
 
-The mesh is generated using MOOSE's [SphereMeshGenerator](https://mooseframework.inl.gov/source/meshgenerators/SphereMeshGenerator.html).
+The mesh is generated using MOOSE's [SphereMeshGenerator](SphereMeshGenerator.md).
 You can either generate this mesh "online" as part of the simulation setup, or
 we can create it as a separate activity and then load it (just as you can load any Exodus
 mesh into a MOOSE simulation). We will do the former here, but still show you
 how you can generate a mesh.
 
-!listing /tutorials/pebble_1/solid.i
+!listing /tutorials/pebble_cht/solid.i
   block=Mesh
 
 We can run this file in "mesh-only mode" (which will skip all of the solves) to generate an Exodus
@@ -218,7 +192,6 @@ which will create a file name `solid_in.e` which contains the mesh. Note
 that you do not *need* to do this! When we run our simulation later, the mesh
 will already be visible in the output file. This is strictly showing you how you would
 generate *just* the mesh from a MOOSE input file.
-
 If we open `solid_in.e` in Paraview, we can see the mesh as shown in [one_pebble_mesh].
 The surface of the pebble is sideset 0.
 
@@ -230,38 +203,38 @@ The surface of the pebble is sideset 0.
 The heat transfer module will solve for temperature, which is defined as a nonlinear
 variable.
 
-!listing /tutorials/pebble_1/solid.i
+!listing /tutorials/pebble_cht/solid.i
   block=Variables
 
 Next, the governing equation solved by MOOSE is specified with the `Kernels` block as the
-[HeatConduction](https://mooseframework.inl.gov/source/kernels/HeatConduction.html)
+[HeatConduction](HeatConduction.md)
  kernel plus the
-[BodyForce](https://mooseframework.inl.gov/source/kernels/BodyForce.html) kernel.
+[BodyForce](BodyForce.md) kernel.
 On the fluid-solid interface,
-a [MatchedValueBC](https://mooseframework.inl.gov/source/bcs/MatchedValueBC.html)
+a [MatchedValueBC](MatchedValueBC.md)
  applies the value of a variable named `nek_temp` (discussed soon) as a Dirichlet condition.
-The [HeatConduction](https://mooseframework.inl.gov/source/kernels/HeatConduction.html)
+The [HeatConduction](HeatConduction.md)
  kernel requires a material property for the thermal conductivity.
 
-!listing /tutorials/pebble_1/solid.i
+!listing /tutorials/pebble_cht/solid.i
   start=Kernels
   end=Executioner
 
-[AuxVariables](https://mooseframework.inl.gov/source/variables/AuxVariable.html)
+[AuxVariables](AuxVariable.md)
 are used to represent field data which passes between different applications. Here,
 we need to define an auxiliary variable to represent the field data for wall temperature
 (`nek_temp`, to be *received* from NekRS) and the wall heat flux (`flux`, to be *sent*
 to NekRS).
-A [DiffusionFluxAux](https://mooseframework.inl.gov/source/auxkernels/DiffusionFluxAux.html) auxiliary kernel is specified
+A [DiffusionFluxAux](DiffusionFluxAux.md) auxiliary kernel is specified
 to compute the flux on the `fluid_solid_interface` boundary. The `flux` variable must be
 a monomial field due to the nature of how MOOSE computes material properties.
 
-!listing /tutorials/pebble_1/solid.i
+!listing /tutorials/pebble_cht/solid.i
   start=AuxVariables
   end=Postprocessors
 
-Next, the [MultiApps](https://mooseframework.inl.gov/syntax/MultiApps/index.html)
- and [Transfers](https://mooseframework.inl.gov/syntax/Transfers/index.html)
+Next, the [MultiApps](MultiApps/index.md)
+ and [Transfers](Transfers/index.md)
 blocks describe the interaction between Cardinal
 and MOOSE. The MOOSE heat transfer module is here run as the main application, with
 the NekRS wrapping run as the sub-application. We specify that MOOSE will run first on each
@@ -269,7 +242,12 @@ time step. Allowing sub-cycling means that, if the MOOSE time step is 0.05 secon
 the NekRS time step set in the `.par` file is 0.02 seconds, that for every MOOSE time step, NekRS will perform
 three time steps, of length 0.02, 0.02, and 0.01 seconds to "catch up" to the main
 application. If sub-cycling is turned off, then the smallest time step among all the various
-applications is used.
+applications is used. This is shown schematically below.
+
+!media subcycling2.png
+  id=subcycling2
+  caption=Subcycling in MOOSE will automatically add time steps (blue circles) to the time steps taken by a sub-application to ensure synchronization points. The red circles indicate time steps each application would have taken were it run as a single-physics solve.
+  style=width:80%;margin-left:auto;margin-right:auto;halign:center
 
 Three transfers are required to couple Cardinal and MOOSE; the first is a transfer
 of surface temperature from Cardinal to MOOSE.
@@ -279,7 +257,7 @@ And the third is a transfer of the total integrated heat flux from MOOSE
 to Cardinal (computed as a postprocessor), which is then used internally by NekRS to re-normalize the heat flux (after
 interpolation onto NekRS's [!ac](GLL) points).
 
-!listing /tutorials/pebble_1/solid.i
+!listing /tutorials/pebble_cht/solid.i
   start=MultiApps
   end=AuxVariables
 
@@ -287,15 +265,15 @@ interpolation onto NekRS's [!ac](GLL) points).
 For transfers between two native MOOSE applications, you can ensure
 conservation of a transferred field using the `from_postprocessors_to_be_preserved` and
 `to_postprocessors_to_be_preserved` options available to any class inheriting from
-[MultiAppConservativeTransfer](https://mooseframework.inl.gov/moose/source/transfers/MultiAppConservativeTransfer.html).
+[MultiAppConservativeTransfer](MultiAppConservativeTransfer.md).
 However, proper conservation of a field within NekRS (which uses a completely different
 spatial discretization from MOOSE) requires performing such conservations in NekRS itself.
 This is why an integral postprocessor must explicitly be passed.
 
 Next, postprocessors are used to compute the integral heat flux as a
-[SideIntegralVariablePostprocessor](https://mooseframework.inl.gov/source/postprocessors/SideIntegralVariablePostprocessor.html).
+[SideIntegralVariablePostprocessor](SideIntegralVariablePostprocessor.md).
 
-!listing /tutorials/pebble_1/solid.i
+!listing /tutorials/pebble_cht/solid.i
   block=Postprocessors
 
 Next, the solution methodology is specified. Although the solid phase only
@@ -307,7 +285,7 @@ temperature from the initial condition. We will terminate the coupled solve once
 the relative change in the solid temperature is smaller than the
 `steady_state_tolerance`.
 
-!listing /tutorials/pebble_1/solid.i
+!listing /tutorials/pebble_cht/solid.i
   start=Executioner
   end=MultiApps
 
@@ -351,7 +329,7 @@ the scratch space represent from MOOSE if you are unsure.
 
 When the simulation has completed, you will have created a number of different output files:
 
-- `pebble_cht0.f<n>`, the NekRS output files
+- `pebble0.f<n>`, the NekRS output files
 - `solid_out.e`, an Exodus II output file with the solid mesh and solution
 - `solid_out_nek0.e`, an Exodus II output file with the fluid mirror mesh
   and data that was ultimately transferred in/out of NekRS
@@ -377,3 +355,81 @@ in temperature on the pebble surface.
   id=temperature_cht5
   caption=Fluid temperature (NekRS) and solid temperature (MOOSE)
   style=width:50%;margin-left:auto;margin-right:auto;halign:center
+
+## Heat Transfer Coefficients
+
+A heat transfer coefficient is a constitutive model, often generated by a [!ac](CFD) simulation, which can be used in lower-order solvers to _approximately capture the convective heat transfer process_ without needing to resolve boundary layers in those lower-order solvers.
+
+A heat transfer coefficient is defined as
+
+\begin{equation}
+q^{''}=h\left(T_{\text{wall}}-T_{\text{bulk}}\right)
+\end{equation}
+
+Cardinal contains many postprocessing systems to facilitate the computation of
+heat transfer coefficients (in addition to other constitutive models). Here, we will
+add the necessary quantities to the input files and compute a heat transfer coefficient.
+For reference, we will compare to the following correlation [!cite](incropera) for
+flow over a sphere,
+
+\begin{equation}
+Nu=2+\left(0.4Re^{1/2}+0.06Re^{2/3}\right)Pr^0.4
+\end{equation}
+
+where $Re$ is based on the sphere diameter and $Nu$ is the Nusselt number, defined as
+
+\begin{equation}
+Nu=\frac{hD}{k}
+\end{equation}
+
+For $Re=50$, $Pr=6.98$, $D=0.03$ m, and $k=0.6$ W/m/K, we should expect that our
+heat transfer coefficient computed by NekRS is somewhere in the vicinity of 198.45 W/m$^2$/K. Of course, in this simple case we already have a published correlation for a
+Nusselt number - but for more realistic engineering geometries, such correlations
+may not yet exist!
+
+We need to compute three quantities - $q^{''}$, $T_{\text{wall}$, and $T_{\text{bulk}}$.
+For illustration, we'll compute these as a function of space, and divide up the sphere into 5 axial layers. This is shown conceptually below for the fluid domain (left) and solid domain (right). For each layer, we'll compute (i) the average wall temperature from NekRS, (ii) the average bulk temperature from NekRS, and (iii) the average wall heat flux from MOOSE.
+
+!media pebble_htc.png
+  id=pebble_htc
+  caption=Illustration of the layers to be used for computing the heat transfer coefficient
+  style=width:70%;margin-left:auto;margin-right:auto;halign:center
+
+In the solid file, we add a
+[LayeredSideAverage](LayeredSideAverage.md)
+userobject to evaluate the average surface heat flux in these layers.
+We then output the results of these userobjects to CSV using
+[SpatialUserObjectVectorPostprocessors](SpatialUserObjectVectorPostprocessor.md)
+and by setting `csv = true` in the output.
+
+!listing /tutorials/pebble_cht/solid.i
+  start=UserObjects
+
+In the NekRS input file, we add userobjects to compute average wall temperatures
+and bulk fluid temperatures in axial layers with [NekBinnedSideAverage](NekBinnedSideAverage.html)
+and [NekBinnedVolumeAverage](NekBinnedVolumeAverage.md) objects.
+We then output the results of these userobjects to CSV using
+[SpatialUserObjectVectorPostprocessors](SpatialUserObjectVectorPostprocessor.md). These objects are
+actually performing integrations on the actual CFD mesh used by NekRS, so there is no
+approximation happening from data interpolation to the `[Mesh]`.
+
+!listing /tutorials/pebble_cht/nek.i
+  start=UserObjects
+
+Now, simply re-run the model:
+
+```
+mpiexec -np 4 cardinal-opt -i solid.i
+```
+
+This will output a number of CSV files. Simply run the `htc.py` script provided in order to print the average heat transfer coefficient.
+
+!listing /tutorials/pebble_cht/htc.py language=python
+
+Running this script shows that we've computed an average heat transfer coefficient of 197 W/m$^2$/K - pretty close to the correlation we are comparing to!
+
+```
+$ python htc.py
+
+The average heat transfer coefficient is (W/m^2K):  197.40833018071388
+```
